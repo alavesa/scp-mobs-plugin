@@ -37,7 +37,8 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private void saveDefaultConfigSafely() {
         getConfig().addDefault("blink.enabled", true);
-        getConfig().addDefault("scp106.speed", 0.22);
+        getConfig().addDefault("scp106.speed", 0.35);
+        getConfig().addDefault("scp106.wall-speed", 0.12);
         getConfig().addDefault("mobs.target-creative", false);
         getConfig().addDefault("breach.173", false);
         getConfig().addDefault("breach.106", false);

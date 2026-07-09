@@ -29,21 +29,27 @@ SCP-173 knows when you blink.
 
 ## SCP-173
 
-`/scpmob spawn 173` — the concrete statue. An invisible pathfinding mob carries the
-model, so it navigates corridors and stairs like anything alive:
+`/scpmob spawn 173` — the concrete statue. It does not walk. It **teleports**:
 
-- **frozen while anyone looks at it** (line of sight + facing, spectators don't count)
-- the instant every watcher blinks or turns away, it **moves — fast**, stone scraping
-  on concrete
-- reach a player and their neck snaps. Death message says who did it.
-- unkillable, doesn't burn in daylight, persists across restarts
+- **frozen while anyone looks at it** — and observation is *sticky*: once you're
+  looking at it, a wall edge clipping your line of sight will not silently free it.
+  Only actually turning away (or blinking) does. Glass and windows don't protect it —
+  it sees you seeing it through them.
+- when every watcher blinks or turns away, it hops **up to 10 blocks toward its prey
+  per blink**, with the scrape-clunk on every single move. Walls stop the hop
+  (it teleports through space, not through concrete) and it probes around corners.
+- arrive within reach and the neck snaps — the kill is part of the teleport.
+- unkillable, persists across restarts. The only time it *walks* is inside a
+  player-placed cage.
 
 ## SCP-106
 
 `/scpmob spawn 106` — the Old Man. No pathfinding because he doesn't need any:
 
-- **walks slowly through walls, floors and ceilings**, straight toward the nearest
-  player, trailing black corrosion
+- **walks through walls, floors and ceilings**, straight toward the nearest player,
+  trailing black corrosion — brisk in the open (`scp106.speed`, 0.35), laboring while
+  phasing through solid matter (`scp106.wall-speed`, 0.12)
+- **rises out of the floor** when he arrives on his own during a breach
 - two-frame shuffle animation; a low groan every few seconds
 - touching him: wither + blindness, and if staff has set the **pocket dimension**
   (`/scpmob pd set` — stand where victims should wake up, e.g. your PD build), the
@@ -57,7 +63,8 @@ contain the statue: **hold right-click on SCP-173 with the cage for 15 seconds**
 Let go and the attempt resets. Succeed and a **3D cage model locks around the
 statue** — a caged 173 is docile and **follows its captor anywhere** like on a lead,
 rattling softly. Sneak + empty hand takes the cage off (and then it is very much not
-docile).
+docile). If the captor **dies or strays more than 24 blocks away**, the cage clatters
+off on its own — mind the statue you were leading.
 
 Fine print your D-class will discover: the blink meter keeps running while you hold
 the cage. Fifteen seconds is always long enough to blink at least once. Bring a

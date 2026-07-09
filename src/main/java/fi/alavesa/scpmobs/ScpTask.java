@@ -4,6 +4,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -23,6 +24,7 @@ import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
 import org.joml.AxisAngle4f;
@@ -30,25 +32,29 @@ import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * The SCPs, ticked statelessly by scoreboard tag so they survive restarts.
  *
- * SCP-173 - invisible wolf pathfinder + statue display + interaction hitbox.
- * Frozen while watched, lethal when not. Can be CONTAINED: hold right-click
- * on it with a 173 Cage for 15 seconds and a 3D cage locks around it - a
- * caged statue is docile and follows whoever caged it. Sneak + empty hand
- * takes the cage back off. Nobody said caging it alone was survivable.
+ * SCP-173 hunts by TELEPORTING: while unobserved it hops up to 10 blocks
+ * toward its prey (one hop per blink), scraping loudly with every jump, and
+ * kills on arrival. It never walks - except inside a player-placed cage,
+ * where the docile statue trundles after its captor. Observation is sticky:
+ * once you are looking at it, a wall edge clipping your line of sight will
+ * not free it - only actually looking away (or blinking) does. Glass does
+ * not protect it: mob line of sight sees through transparent blocks.
  *
- * SCP-106 - a display + interaction pair walked through walls toward the
- * nearest player. Touch: heavy corrosion + the pocket dimension. While his
- * containment is BREACHED (/scpmob breach 106), he also emerges from the
- * floor near random players on his own.
+ * SCP-106 walks through walls toward the nearest player - faster in the
+ * open, slowed while phasing through solid matter. When his containment is
+ * breached he emerges near random players, RISING out of the floor, and
+ * rarely teleports directly beneath an unsuspecting victim.
  */
 public final class ScpTask implements Runnable {
 
@@ -60,6 +66,9 @@ public final class ScpTask implements Runnable {
     public static final String TAG_DISPLAY = "scp.display";
 
     public static final int CAGING_TICKS = 15 * 20;
+    private static final double HOP_RANGE = 10.0;
+    private static final int HOP_COOLDOWN = 10;
+    private static final double UNCAGE_DISTANCE_SQ = 24 * 24;
 
     private static final class Caging {
         UUID statue;
@@ -71,8 +80,11 @@ public final class ScpTask implements Runnable {
     private final BlinkManager blink;
     private final NamespacedKey partnerKey;
     private final NamespacedKey ownerKey;
+    private final NamespacedKey riseKey;
     private final Map<UUID, Integer> touchCooldown = new HashMap<>();
     private final Map<UUID, Caging> caging = new HashMap<>();
+    private final Map<UUID, Set<UUID>> watchers = new HashMap<>();
+    private final Map<UUID, Integer> lastHop = new HashMap<>();
     private int tick;
 
     public ScpTask(ScpMobsPlugin plugin, BlinkManager blink) {
@@ -80,6 +92,7 @@ public final class ScpTask implements Runnable {
         this.blink = blink;
         this.partnerKey = new NamespacedKey(plugin, "partner");
         this.ownerKey = new NamespacedKey(plugin, "cage_owner");
+        this.riseKey = new NamespacedKey(plugin, "rise_to");
     }
 
     @Override
@@ -124,50 +137,151 @@ public final class ScpTask implements Runnable {
             tickCaged(statue);
             return;
         }
+        statue.setAI(false); // uncaged 173 NEVER walks - it teleports
         List<Player> nearby = statue.getLocation().getNearbyPlayers(32).stream()
             .filter(this::isFairGame)
             .toList();
         if (nearby.isEmpty()) {
-            statue.setAI(false);
+            watchers.remove(statue.getUniqueId());
             return;
         }
-        boolean observed = nearby.stream().anyMatch(p -> isWatching(p, statue));
+        boolean observed = updateWatchers(statue, nearby);
+        if (observed) return;
+
         Player target = nearby.stream()
             .min((a, b) -> Double.compare(
                 a.getLocation().distanceSquared(statue.getLocation()),
                 b.getLocation().distanceSquared(statue.getLocation())))
             .orElse(null);
+        if (target == null) return;
 
-        if (observed) {
-            statue.setAI(false);
-        } else {
-            statue.setAI(true);
-            if (target != null) {
-                statue.getPathfinder().moveTo(target, 1.9);
-                if (tick % 6 == 0) {
-                    statue.getWorld().playSound(statue.getLocation(),
-                        Sound.BLOCK_STONE_STEP, 1.3f, 0.55f);
-                }
-                if (target.getLocation().distanceSquared(statue.getLocation()) < 2.1) {
-                    snap(statue, target);
+        // already in reach: the kill does not wait for a hop
+        if (target.getLocation().distanceSquared(statue.getLocation()) < 3.3) {
+            snap(statue, target);
+            return;
+        }
+        Integer last = lastHop.get(statue.getUniqueId());
+        if (last != null && tick - last < HOP_COOLDOWN) return;
+        lastHop.put(statue.getUniqueId(), tick);
+        hop(statue, target);
+    }
+
+    /**
+     * Sticky observation. A player WATCHES the statue if they face it and
+     * either have line of sight (glass is transparent to this check) or were
+     * already watching - so a wall edge grazing the sightline never silently
+     * frees it. Looking away or blinking is what releases it.
+     */
+    private boolean updateWatchers(Wolf statue, List<Player> nearby) {
+        Set<UUID> old = watchers.computeIfAbsent(statue.getUniqueId(), id -> new HashSet<>());
+        Set<UUID> now = new HashSet<>();
+        for (Player player : nearby) {
+            if (blink.isBlinking(player)) continue;
+            if (!isFacing(player, statue)) continue;
+            if (player.hasLineOfSight(statue) || old.contains(player.getUniqueId())) {
+                now.add(player.getUniqueId());
+            }
+        }
+        watchers.put(statue.getUniqueId(), now);
+        return !now.isEmpty();
+    }
+
+    private boolean isFacing(Player player, Entity entity) {
+        Vector toEntity = entity.getLocation().add(0, 1.0, 0)
+            .toVector().subtract(player.getEyeLocation().toVector());
+        if (toEntity.lengthSquared() < 0.01) return true;
+        return player.getEyeLocation().getDirection().dot(toEntity.normalize()) > 0.25;
+    }
+
+    /** One teleport hop: up to 10 blocks toward the prey, never through walls. */
+    private void hop(Wolf statue, Player target) {
+        Location from = statue.getLocation().clone().add(0, 0.9, 0);
+        Vector toTarget = target.getLocation().add(0, 0.9, 0).toVector().subtract(from.toVector());
+        double distance = toTarget.length();
+        double wanted = Math.min(HOP_RANGE, distance - 0.9);
+        if (wanted < 0.5) return;
+        Vector dir = toTarget.clone().normalize();
+
+        double travel = clearance(statue.getWorld(), from, dir, wanted);
+        if (travel < 1.2) {
+            // cornered: probe rotated directions and take the most useful gap
+            double bestScore = -1;
+            Vector bestDir = null;
+            double bestTravel = 0;
+            for (int degrees : new int[]{45, -45, 90, -90, 135, -135, 180}) {
+                Vector probe = rotate(dir, Math.toRadians(degrees));
+                double c = clearance(statue.getWorld(), from, probe, 6);
+                double score = c * (1.0 - Math.abs(degrees) / 360.0);
+                if (c >= 2.0 && score > bestScore) {
+                    bestScore = score;
+                    bestDir = probe;
+                    bestTravel = c;
                 }
             }
+            if (bestDir == null) return; // boxed in - it waits
+            dir = bestDir;
+            travel = Math.min(6, bestTravel);
+        }
+
+        Location dest = from.clone().add(dir.clone().multiply(travel)).subtract(0, 0.9, 0);
+        for (int i = 0; i < 4 && dest.getBlock().isPassable()
+            && dest.clone().subtract(0, 1, 0).getBlock().isPassable(); i++) {
+            dest.subtract(0, 1, 0);
+        }
+        dest.setYaw(yawToward(dest, target.getLocation()));
+        dest.setPitch(0);
+        teleportStatue(statue, dest);
+        // the scrape-clunk: every move makes a noise
+        statue.getWorld().playSound(dest, Sound.BLOCK_STONE_STEP, 1.4f, 0.5f);
+        statue.getWorld().playSound(dest, Sound.BLOCK_STONE_BREAK, 0.9f, 0.6f);
+        if (target.getLocation().distanceSquared(dest) < 3.3) {
+            snap(statue, target);
+        }
+    }
+
+    private double clearance(World world, Location from, Vector dir, double max) {
+        RayTraceResult hit = world.rayTraceBlocks(from, dir, max, FluidCollisionMode.NEVER, true);
+        if (hit == null) return max;
+        return Math.max(0, hit.getHitPosition().distance(from.toVector()) - 0.8);
+    }
+
+    private Vector rotate(Vector v, double radians) {
+        double cos = Math.cos(radians), sin = Math.sin(radians);
+        return new Vector(v.getX() * cos - v.getZ() * sin, v.getY(), v.getX() * sin + v.getZ() * cos);
+    }
+
+    private float yawToward(Location from, Location to) {
+        double dx = to.getX() - from.getX(), dz = to.getZ() - from.getZ();
+        return (float) Math.toDegrees(Math.atan2(-dx, dz));
+    }
+
+    /** Teleporting a vehicle ejects its passengers - move the whole stack. */
+    private void teleportStatue(Wolf statue, Location dest) {
+        List<Entity> passengers = new ArrayList<>(statue.getPassengers());
+        statue.teleport(dest);
+        for (Entity passenger : passengers) {
+            passenger.teleport(dest);
+            statue.addPassenger(passenger);
         }
         syncPassengers(statue);
     }
 
-    /** A caged statue is docile: it trundles after whoever caged it. */
+    /** A caged statue is docile: it walks (its only walking) after its captor. */
     private void tickCaged(Wolf statue) {
         String ownerId = statue.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
         Player owner = ownerId == null ? null : Bukkit.getPlayer(UUID.fromString(ownerId));
-        if (owner != null && owner.isOnline()
-            && owner.getWorld() == statue.getWorld()
-            && owner.getLocation().distanceSquared(statue.getLocation()) < 1600) {
-            if (owner.getLocation().distanceSquared(statue.getLocation()) > 9) {
-                statue.setAI(true);
-                statue.getPathfinder().moveTo(owner, 1.15);
-            } else {
-                statue.setAI(false);
+        boolean lost = owner == null || !owner.isOnline() || owner.isDead()
+            || owner.getWorld() != statue.getWorld()
+            || owner.getLocation().distanceSquared(statue.getLocation()) > UNCAGE_DISTANCE_SQ;
+        if (lost) {
+            autoUncage(statue);
+            return;
+        }
+        if (owner.getLocation().distanceSquared(statue.getLocation()) > 9) {
+            statue.setAI(true);
+            statue.getPathfinder().moveTo(owner, 1.15);
+            if (tick % 8 == 0) {
+                statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_STONE_STEP, 0.9f, 0.6f);
             }
         } else {
             statue.setAI(false);
@@ -176,6 +290,19 @@ public final class ScpTask implements Runnable {
             statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_CHAIN_STEP, 0.8f, 0.7f);
         }
         syncPassengers(statue);
+    }
+
+    /** The captor died or wandered off: the cage clatters to the floor. */
+    private void autoUncage(Wolf statue) {
+        statue.removeScoreboardTag(TAG_173_CAGED);
+        statue.getPersistentDataContainer().remove(ownerKey);
+        for (Entity passenger : new ArrayList<>(statue.getPassengers())) {
+            if (passenger.getScoreboardTags().contains(TAG_CAGE3D)) {
+                passenger.remove();
+            }
+        }
+        statue.getWorld().dropItemNaturally(statue.getLocation(), CageListener.makeCage());
+        statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_ANVIL_BREAK, 1f, 0.7f);
     }
 
     private void syncPassengers(Wolf statue) {
@@ -193,19 +320,20 @@ public final class ScpTask implements Runnable {
             && plugin.getConfig().getBoolean("mobs.target-creative", false);
     }
 
-    private boolean isWatching(Player player, Entity entity) {
-        if (blink.isBlinking(player)) return false;
-        if (!player.hasLineOfSight(entity)) return false;
-        Vector toEntity = entity.getLocation().add(0, 1.0, 0)
-            .toVector().subtract(player.getEyeLocation().toVector());
-        if (toEntity.lengthSquared() < 0.01) return true;
-        return player.getEyeLocation().getDirection().dot(toEntity.normalize()) > 0.25;
-    }
-
     private void snap(Wolf statue, Player victim) {
+        Location at = victim.getLocation().clone();
+        at.setYaw(yawToward(statue.getLocation(), victim.getLocation()));
+        at.setPitch(0);
+        Vector back = victim.getLocation().toVector()
+            .subtract(statue.getLocation().toVector());
+        if (back.lengthSquared() > 0.01) {
+            at.subtract(back.normalize().multiply(0.8));
+        }
+        teleportStatue(statue, at);
         victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_SKELETON_HURT, 1.4f, 0.5f);
         victim.getWorld().playSound(victim.getLocation(), Sound.BLOCK_BONE_BLOCK_BREAK, 1.4f, 0.7f);
         victim.damage(1000.0, statue);
+        lastHop.put(statue.getUniqueId(), tick + 20); // savor the moment
     }
 
     // ------------------------------------------------------------- caging
@@ -288,12 +416,13 @@ public final class ScpTask implements Runnable {
     // ------------------------------------------------------------- SCP-106
 
     private void tick106(ItemDisplay body) {
-        // Breached 106 has extra privileges: rarely, he steps out of the floor
-        // right beneath a random unsuspecting player.
+        if (tickRising(body)) return;
+        // Breached 106 has privileges: rarely, he goes under someone's floor.
         if (tick % 600 == 0 && plugin.getConfig().getBoolean("breach.106", false)
             && ThreadLocalRandom.current().nextDouble()
                < plugin.getConfig().getDouble("scp106.ambush-chance", 0.08)) {
             ambush(body);
+            return;
         }
         Player target = body.getLocation().getNearbyPlayers(40).stream()
             .filter(this::isFairGame)
@@ -308,8 +437,11 @@ public final class ScpTask implements Runnable {
                 .subtract(loc.toVector());
             double distance = step.length();
             if (distance > 0.05) {
-                double speed = plugin.getConfig().getDouble("scp106.speed", 0.22);
-                step.normalize().multiply(Math.min(speed, distance)); // relentless, through walls
+                // brisk in the open, laboring while phasing through solid matter
+                boolean inWall = !loc.getBlock().isPassable();
+                double speed = plugin.getConfig().getDouble(
+                    inWall ? "scp106.wall-speed" : "scp106.speed", inWall ? 0.12 : 0.35);
+                step.normalize().multiply(Math.min(speed, distance));
                 loc.add(step);
                 loc.setYaw((float) Math.toDegrees(Math.atan2(-step.getX(), step.getZ())));
             }
@@ -329,7 +461,40 @@ public final class ScpTask implements Runnable {
         setModel(body, Material.BLACK_CONCRETE, frame);
     }
 
-    /** Teleport beneath a random player in the same world. No warning given. */
+    /** The entrance: rising slowly out of the floor. Returns true while rising. */
+    private boolean tickRising(ItemDisplay body) {
+        Double riseTo = body.getPersistentDataContainer().get(riseKey, PersistentDataType.DOUBLE);
+        if (riseTo == null) return false;
+        Location loc = body.getLocation();
+        if (loc.getY() >= riseTo - 0.01) {
+            body.getPersistentDataContainer().remove(riseKey);
+            return false;
+        }
+        loc.add(0, 0.08, 0);
+        body.teleport(loc);
+        Interaction partner = partnerOf(body);
+        if (partner != null) partner.teleport(loc.clone().subtract(0, 0.9, 0));
+        body.getWorld().spawnParticle(Particle.SQUID_INK, loc.clone().subtract(0, 0.6, 0),
+            8, 0.4, 0.15, 0.4, 0.02);
+        body.getWorld().spawnParticle(Particle.BLOCK_CRUMBLE, loc.clone().subtract(0, 0.8, 0),
+            10, 0.4, 0.1, 0.4, Material.BLACK_CONCRETE.createBlockData());
+        if (tick % 20 == 0) {
+            body.getWorld().playSound(loc, Sound.BLOCK_GRAVEL_BREAK, 1f, 0.5f);
+        }
+        return true;
+    }
+
+    private void startRise(ItemDisplay body, double surfaceY) {
+        body.getPersistentDataContainer().set(riseKey, PersistentDataType.DOUBLE, surfaceY + 0.9);
+        Location below = body.getLocation();
+        below.setY(surfaceY - 1.6);
+        body.teleport(below);
+        Interaction partner = partnerOf(body);
+        if (partner != null) partner.teleport(below.clone().subtract(0, 0.9, 0));
+        body.getWorld().playSound(below, Sound.ENTITY_ELDER_GUARDIAN_CURSE, 1.5f, 0.35f);
+    }
+
+    /** Teleport beneath a random player in the same world - then rise. */
     private void ambush(ItemDisplay body) {
         List<Player> candidates = body.getWorld().getPlayers().stream()
             .filter(this::isFairGame)
@@ -337,13 +502,12 @@ public final class ScpTask implements Runnable {
             .toList();
         if (candidates.isEmpty()) return;
         Player unlucky = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-        Location dest = unlucky.getLocation().clone().add(0, 0.1, 0);
+        Location dest = unlucky.getLocation().clone();
         dest.setPitch(0);
         body.teleport(dest.clone().add(0, 0.9, 0));
         Interaction partner = partnerOf(body);
         if (partner != null) partner.teleport(dest);
-        dest.getWorld().spawnParticle(Particle.SQUID_INK, dest.clone().add(0, 0.6, 0), 50, 0.4, 0.7, 0.4, 0.03);
-        dest.getWorld().playSound(dest, Sound.ENTITY_ELDER_GUARDIAN_CURSE, 1.5f, 0.35f);
+        startRise(body, dest.getY());
         dest.getWorld().playSound(dest, Sound.BLOCK_SCULK_SHRIEKER_SHRIEK, 0.8f, 0.4f);
     }
 
@@ -387,9 +551,8 @@ public final class ScpTask implements Runnable {
         double reach = 8 + ThreadLocalRandom.current().nextDouble(6);
         Location at = unlucky.getLocation().clone()
             .add(Math.cos(angle) * reach, 0, Math.sin(angle) * reach);
-        spawn106(at);
-        at.getWorld().spawnParticle(Particle.SQUID_INK, at.clone().add(0, 1, 0), 40, 0.4, 0.8, 0.4, 0.02);
-        at.getWorld().playSound(at, Sound.ENTITY_ELDER_GUARDIAN_CURSE, 1.4f, 0.4f);
+        ItemDisplay body = spawn106(at);
+        startRise(body, at.getY());
     }
 
     /** Removes every SCP-106 (recontainment): they corrode back into the floor. */
@@ -420,6 +583,7 @@ public final class ScpTask implements Runnable {
             wolf.setSilent(true);
             wolf.setPersistent(true);
             wolf.setRemoveWhenFarAway(false);
+            wolf.setAI(false);
             wolf.customName(Component.text("SCP-173", NamedTextColor.RED));
             wolf.setCustomNameVisible(false);
             wolf.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(0.45);
@@ -429,15 +593,15 @@ public final class ScpTask implements Runnable {
         ItemDisplay display = spawnModel(location, Material.DIORITE, "scp173", 2.0f, 0.45f);
         statue.addPassenger(display);
         Interaction hitbox = location.getWorld().spawn(location, Interaction.class, i -> {
-            i.setInteractionWidth(1.0f);
-            i.setInteractionHeight(1.9f);
+            i.setInteractionWidth(1.7f);
+            i.setInteractionHeight(2.4f);
             i.setPersistent(true);
             i.addScoreboardTag(TAG_173_HITBOX);
         });
         statue.addPassenger(hitbox);
     }
 
-    public void spawn106(Location location) {
+    public ItemDisplay spawn106(Location location) {
         location = location.clone();
         location.setPitch(0);
         ItemDisplay body = spawnModel(location.clone().add(0, 0.9, 0),
@@ -453,6 +617,7 @@ public final class ScpTask implements Runnable {
         });
         body.getPersistentDataContainer().set(partnerKey, PersistentDataType.STRING,
             hitbox.getUniqueId().toString());
+        return body;
     }
 
     private ItemDisplay spawnModel(Location location, Material base, String cmd, float scale, float rise) {
