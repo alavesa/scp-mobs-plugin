@@ -1,0 +1,13 @@
+{
+  "providers": [
+    {
+      "type": "bitmap",
+      "file": "scp:font/blink.png",
+      "height": 300,
+      "ascent": 130,
+      "chars": [
+        "\ue000"
+      ]
+    }
+  ]
+}

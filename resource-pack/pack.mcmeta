@@ -1,0 +1,10 @@
+{
+  "pack": {
+    "pack_format": 46,
+    "supported_formats": {
+      "min_inclusive": 46,
+      "max_inclusive": 99
+    },
+    "description": "\u00a7cScpMobs\u00a7r \u2014 SCP-173, SCP-106 & the blink"
+  }
+}
