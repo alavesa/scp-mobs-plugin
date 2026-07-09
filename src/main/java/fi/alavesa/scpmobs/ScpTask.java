@@ -15,7 +15,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.Interaction;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
-import org.bukkit.entity.Zombie;
+import org.bukkit.entity.Wolf;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
@@ -69,21 +69,32 @@ public final class ScpTask implements Runnable {
     public void run() {
         tick += 2; // scheduled every 2 ticks
         for (World world : Bukkit.getWorlds()) {
-            for (Zombie zombie : world.getEntitiesByClass(Zombie.class)) {
-                if (zombie.getScoreboardTags().contains(TAG_173)) tick173(zombie);
+            for (Wolf wolf : world.getEntitiesByClass(Wolf.class)) {
+                if (wolf.getScoreboardTags().contains(TAG_173)) tick173(wolf);
             }
             for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
                 if (display.getScoreboardTags().contains(TAG_106)) tick106(display);
             }
         }
         touchCooldown.entrySet().removeIf(e -> e.getValue() < tick);
+        if (tick % 100 == 0) {
+            for (World world : Bukkit.getWorlds()) {
+                for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
+                    if (display.getScoreboardTags().contains(TAG_DISPLAY)
+                        && !display.getScoreboardTags().contains(TAG_106)
+                        && display.getVehicle() == null) {
+                        display.remove(); // orphaned statue shell (base mob lost)
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------- SCP-173
 
-    private void tick173(Zombie statue) {
+    private void tick173(Wolf statue) {
         List<Player> nearby = statue.getLocation().getNearbyPlayers(32).stream()
-            .filter(p -> p.getGameMode() == GameMode.SURVIVAL || p.getGameMode() == GameMode.ADVENTURE)
+            .filter(this::isFairGame)
             .toList();
         if (nearby.isEmpty()) {
             statue.setAI(false);
@@ -119,6 +130,13 @@ public final class ScpTask implements Runnable {
         }
     }
 
+    /** SCPs hunt survival/adventure players; creative only if the config says so. */
+    private boolean isFairGame(Player player) {
+        if (player.getGameMode() == GameMode.SURVIVAL || player.getGameMode() == GameMode.ADVENTURE) return true;
+        return player.getGameMode() == GameMode.CREATIVE
+            && plugin.getConfig().getBoolean("mobs.target-creative", false);
+    }
+
     private boolean isWatching(Player player, Entity entity) {
         if (blink.isBlinking(player)) return false;
         if (!player.hasLineOfSight(entity)) return false;
@@ -128,7 +146,7 @@ public final class ScpTask implements Runnable {
         return player.getEyeLocation().getDirection().dot(toEntity.normalize()) > 0.25;
     }
 
-    private void snap(Zombie statue, Player victim) {
+    private void snap(Wolf statue, Player victim) {
         victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_SKELETON_HURT, 1.4f, 0.5f);
         victim.getWorld().playSound(victim.getLocation(), Sound.BLOCK_BONE_BLOCK_BREAK, 1.4f, 0.7f);
         victim.damage(1000.0, statue);
@@ -138,7 +156,7 @@ public final class ScpTask implements Runnable {
 
     private void tick106(ItemDisplay body) {
         Player target = body.getLocation().getNearbyPlayers(40).stream()
-            .filter(p -> p.getGameMode() == GameMode.SURVIVAL || p.getGameMode() == GameMode.ADVENTURE)
+            .filter(this::isFairGame)
             .min((a, b) -> Double.compare(
                 a.getLocation().distanceSquared(body.getLocation()),
                 b.getLocation().distanceSquared(body.getLocation())))
@@ -150,7 +168,8 @@ public final class ScpTask implements Runnable {
                 .subtract(loc.toVector());
             double distance = step.length();
             if (distance > 0.05) {
-                step.normalize().multiply(Math.min(0.13, distance)); // slow, relentless, through walls
+                double speed = plugin.getConfig().getDouble("scp106.speed", 0.22);
+                step.normalize().multiply(Math.min(speed, distance)); // relentless, through walls
                 loc.add(step);
                 loc.setYaw((float) Math.toDegrees(Math.atan2(-step.getX(), step.getZ())));
             }
@@ -182,42 +201,43 @@ public final class ScpTask implements Runnable {
         Integer until = touchCooldown.get(victim.getUniqueId());
         if (until != null && until > tick) return;
         touchCooldown.put(victim.getUniqueId(), tick + 100);
+        victim.damage(12.0, body);
         victim.addPotionEffect(new PotionEffect(PotionEffectType.WITHER, 200, 2));
         victim.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 100, 0));
         victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 0.4f);
         Location pd = plugin.pocketDimension();
-        if (pd != null) {
+        if (pd != null && victim.isValid() && !victim.isDead()) {
             victim.teleport(pd);
             victim.sendActionBar(Component.text("The world corrodes away.", NamedTextColor.GRAY, net.kyori.adventure.text.format.TextDecoration.ITALIC));
-        } else {
-            victim.damage(8.0, body);
         }
     }
 
     // ------------------------------------------------------------- spawning
 
     public void spawn173(Location location) {
-        Zombie statue = location.getWorld().spawn(location, Zombie.class, zombie -> {
-            zombie.setAdult();
-            zombie.setInvisible(true);
-            zombie.setSilent(true);
-            zombie.setPersistent(true);
-            zombie.setRemoveWhenFarAway(false);
-            zombie.setShouldBurnInDay(false);
-            zombie.customName(Component.text("SCP-173", NamedTextColor.RED));
-            zombie.setCustomNameVisible(false);
-            zombie.getEquipment().clear();
-            zombie.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(0.42);
-            zombie.getAttribute(Attribute.FOLLOW_RANGE).setBaseValue(48);
-            zombie.addScoreboardTag(TAG_173);
+        location = location.clone();
+        location.setPitch(0);
+        Wolf statue = location.getWorld().spawn(location, Wolf.class, wolf -> {
+            wolf.setAdult();
+            wolf.setInvisible(true);
+            wolf.setSilent(true);
+            wolf.setPersistent(true);
+            wolf.setRemoveWhenFarAway(false);
+            wolf.customName(Component.text("SCP-173", NamedTextColor.RED));
+            wolf.setCustomNameVisible(false);
+            wolf.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(0.45);
+            wolf.getAttribute(Attribute.FOLLOW_RANGE).setBaseValue(48);
+            wolf.addScoreboardTag(TAG_173);
         });
-        ItemDisplay display = spawnModel(location, Material.DIORITE, "scp173", 2.0f);
+        ItemDisplay display = spawnModel(location, Material.DIORITE, "scp173", 2.0f, 0.45f);
         statue.addPassenger(display);
     }
 
     public void spawn106(Location location) {
+        location = location.clone();
+        location.setPitch(0);
         ItemDisplay body = spawnModel(location.clone().add(0, 0.9, 0),
-            Material.BLACK_CONCRETE, "scp106_walk1", 2.1f);
+            Material.BLACK_CONCRETE, "scp106_walk1", 2.1f, 0f);
         body.addScoreboardTag(TAG_106);
         Interaction hitbox = location.getWorld().spawn(location, Interaction.class, i -> {
             i.setInteractionWidth(0.9f);
@@ -231,13 +251,13 @@ public final class ScpTask implements Runnable {
             hitbox.getUniqueId().toString());
     }
 
-    private ItemDisplay spawnModel(Location location, Material base, String cmd, float scale) {
+    private ItemDisplay spawnModel(Location location, Material base, String cmd, float scale, float rise) {
         return location.getWorld().spawn(location, ItemDisplay.class, display -> {
             display.setPersistent(true);
             display.setTeleportDuration(2);
             display.setBrightness(new org.bukkit.entity.Display.Brightness(15, 10));
             display.setTransformation(new Transformation(
-                new Vector3f(0, 0, 0), new AxisAngle4f(0, 0, 0, 1),
+                new Vector3f(0, rise, 0), new AxisAngle4f(0, 0, 0, 1),
                 new Vector3f(scale, scale, scale), new AxisAngle4f(0, 0, 0, 1)));
             display.addScoreboardTag(TAG_DISPLAY);
             setModel(display, base, cmd);

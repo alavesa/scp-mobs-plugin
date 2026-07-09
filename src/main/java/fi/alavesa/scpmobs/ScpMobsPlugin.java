@@ -36,6 +36,8 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private void saveDefaultConfigSafely() {
         getConfig().addDefault("blink.enabled", true);
+        getConfig().addDefault("scp106.speed", 0.22);
+        getConfig().addDefault("mobs.target-creative", false);
         getConfig().options().copyDefaults(true);
         saveConfig();
     }
@@ -76,10 +78,12 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                     case "173" -> {
                         task.spawn173(player.getLocation());
                         sender.sendMessage(Component.text("SCP-173 is here. Don't blink.", NamedTextColor.GRAY));
+                        warnCreative(player);
                     }
                     case "106" -> {
                         task.spawn106(player.getLocation());
                         sender.sendMessage(Component.text("SCP-106 is loose.", NamedTextColor.GRAY));
+                        warnCreative(player);
                     }
                     default -> { return error(sender, "Known SCPs: 173, 106"); }
                 }
@@ -147,6 +151,15 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
             };
             default -> List.of();
         };
+    }
+
+    private void warnCreative(Player player) {
+        if (player.getGameMode() == org.bukkit.GameMode.CREATIVE
+            && !getConfig().getBoolean("mobs.target-creative", false)) {
+            player.sendMessage(Component.text(
+                "Note: SCPs ignore creative/spectator players - switch to survival to test them "
+                + "(or set mobs.target-creative: true).", NamedTextColor.YELLOW));
+        }
     }
 
     private boolean usage(CommandSender sender) {
