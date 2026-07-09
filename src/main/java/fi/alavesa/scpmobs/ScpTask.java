@@ -2,6 +2,7 @@ package fi.alavesa.scpmobs;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -27,42 +28,58 @@ import org.bukkit.util.Vector;
 import org.joml.AxisAngle4f;
 import org.joml.Vector3f;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * The SCPs themselves, ticked statelessly by scoreboard tag so they survive
- * restarts and chunk reloads.
+ * The SCPs, ticked statelessly by scoreboard tag so they survive restarts.
  *
- * SCP-173 - an invisible zombie provides real pathfinding; an item_display
- * passenger carries the statue model. It is frozen while any non-blinking
- * survival/adventure player is looking at it with line of sight; the moment
- * every watcher blinks or looks away, it moves - fast - and snaps the neck of
- * whoever it reaches.
+ * SCP-173 - invisible wolf pathfinder + statue display + interaction hitbox.
+ * Frozen while watched, lethal when not. Can be CONTAINED: hold right-click
+ * on it with a 173 Cage for 15 seconds and a 3D cage locks around it - a
+ * caged statue is docile and follows whoever caged it. Sneak + empty hand
+ * takes the cage back off. Nobody said caging it alone was survivable.
  *
- * SCP-106 - no pathfinding at all: an item_display + interaction pair that
- * the plugin walks slowly through walls toward the nearest player, corroding
- * as it goes. Touch means the pocket dimension (a staff-set location) - or,
- * if none is set, severe corrosion. It cannot be harmed.
+ * SCP-106 - a display + interaction pair walked through walls toward the
+ * nearest player. Touch: heavy corrosion + the pocket dimension. While his
+ * containment is BREACHED (/scpmob breach 106), he also emerges from the
+ * floor near random players on his own.
  */
 public final class ScpTask implements Runnable {
 
     public static final String TAG_173 = "scp.173";
+    public static final String TAG_173_HITBOX = "scp.173.hitbox";
+    public static final String TAG_173_CAGED = "scp.173.caged";
+    public static final String TAG_CAGE3D = "scp.cage3d";
     public static final String TAG_106 = "scp.106";
     public static final String TAG_DISPLAY = "scp.display";
+
+    public static final int CAGING_TICKS = 15 * 20;
+
+    private static final class Caging {
+        UUID statue;
+        int progress;
+        int lastHeld;
+    }
 
     private final ScpMobsPlugin plugin;
     private final BlinkManager blink;
     private final NamespacedKey partnerKey;
+    private final NamespacedKey ownerKey;
     private final Map<UUID, Integer> touchCooldown = new HashMap<>();
+    private final Map<UUID, Caging> caging = new HashMap<>();
     private int tick;
 
     public ScpTask(ScpMobsPlugin plugin, BlinkManager blink) {
         this.plugin = plugin;
         this.blink = blink;
         this.partnerKey = new NamespacedKey(plugin, "partner");
+        this.ownerKey = new NamespacedKey(plugin, "cage_owner");
     }
 
     @Override
@@ -76,15 +93,25 @@ public final class ScpTask implements Runnable {
                 if (display.getScoreboardTags().contains(TAG_106)) tick106(display);
             }
         }
+        tickCaging();
+        if (tick % 600 == 0) tickBreachSpawns();
         touchCooldown.entrySet().removeIf(e -> e.getValue() < tick);
-        if (tick % 100 == 0) {
-            for (World world : Bukkit.getWorlds()) {
-                for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
-                    if (display.getScoreboardTags().contains(TAG_DISPLAY)
-                        && !display.getScoreboardTags().contains(TAG_106)
-                        && display.getVehicle() == null) {
-                        display.remove(); // orphaned statue shell (base mob lost)
-                    }
+        if (tick % 100 == 0) sweepOrphans();
+    }
+
+    private void sweepOrphans() {
+        for (World world : Bukkit.getWorlds()) {
+            for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
+                if (display.getScoreboardTags().contains(TAG_DISPLAY)
+                    && !display.getScoreboardTags().contains(TAG_106)
+                    && display.getVehicle() == null) {
+                    display.remove();
+                }
+            }
+            for (Interaction interaction : world.getEntitiesByClass(Interaction.class)) {
+                if (interaction.getScoreboardTags().contains(TAG_173_HITBOX)
+                    && interaction.getVehicle() == null) {
+                    interaction.remove();
                 }
             }
         }
@@ -93,6 +120,10 @@ public final class ScpTask implements Runnable {
     // ------------------------------------------------------------- SCP-173
 
     private void tick173(Wolf statue) {
+        if (statue.getScoreboardTags().contains(TAG_173_CAGED)) {
+            tickCaged(statue);
+            return;
+        }
         List<Player> nearby = statue.getLocation().getNearbyPlayers(32).stream()
             .filter(this::isFairGame)
             .toList();
@@ -122,7 +153,32 @@ public final class ScpTask implements Runnable {
                 }
             }
         }
-        // keep the statue model facing the way the zombie faces
+        syncPassengers(statue);
+    }
+
+    /** A caged statue is docile: it trundles after whoever caged it. */
+    private void tickCaged(Wolf statue) {
+        String ownerId = statue.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
+        Player owner = ownerId == null ? null : Bukkit.getPlayer(UUID.fromString(ownerId));
+        if (owner != null && owner.isOnline()
+            && owner.getWorld() == statue.getWorld()
+            && owner.getLocation().distanceSquared(statue.getLocation()) < 1600) {
+            if (owner.getLocation().distanceSquared(statue.getLocation()) > 9) {
+                statue.setAI(true);
+                statue.getPathfinder().moveTo(owner, 1.15);
+            } else {
+                statue.setAI(false);
+            }
+        } else {
+            statue.setAI(false);
+        }
+        if (tick % 80 == 0) {
+            statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_CHAIN_STEP, 0.8f, 0.7f);
+        }
+        syncPassengers(statue);
+    }
+
+    private void syncPassengers(Wolf statue) {
         for (Entity passenger : statue.getPassengers()) {
             if (passenger instanceof ItemDisplay display) {
                 display.setRotation(statue.getLocation().getYaw(), 0f);
@@ -152,9 +208,93 @@ public final class ScpTask implements Runnable {
         victim.damage(1000.0, statue);
     }
 
+    // ------------------------------------------------------------- caging
+
+    /** Called from CageListener for every held-right-click tick on a statue. */
+    public void progressCaging(Player player, Wolf statue) {
+        if (statue.getScoreboardTags().contains(TAG_173_CAGED)) return;
+        Caging session = caging.computeIfAbsent(player.getUniqueId(), id -> new Caging());
+        if (!statue.getUniqueId().equals(session.statue)) {
+            session.statue = statue.getUniqueId();
+            session.progress = 0;
+        }
+        session.lastHeld = tick;
+    }
+
+    private void tickCaging() {
+        Iterator<Map.Entry<UUID, Caging>> it = caging.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, Caging> entry = it.next();
+            Player player = Bukkit.getPlayer(entry.getKey());
+            Caging session = entry.getValue();
+            if (player == null || !player.isOnline()) { it.remove(); continue; }
+            if (tick - session.lastHeld > 8) {
+                it.remove();
+                player.sendActionBar(Component.text("The cage slips.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+                continue;
+            }
+            if (!(Bukkit.getEntity(session.statue) instanceof Wolf statue) || statue.isDead()) {
+                it.remove();
+                continue;
+            }
+            session.progress += 2;
+            if (session.progress % 20 == 0) {
+                int left = (CAGING_TICKS - session.progress) / 20 + 1;
+                player.sendActionBar(Component.text("Caging SCP-173... " + left + "s",
+                    NamedTextColor.GRAY, TextDecoration.ITALIC));
+                player.playSound(player.getLocation(), Sound.ITEM_CROSSBOW_LOADING_MIDDLE, 0.6f, 0.8f);
+            }
+            if (session.progress >= CAGING_TICKS) {
+                it.remove();
+                completeCaging(player, statue);
+            }
+        }
+    }
+
+    private void completeCaging(Player player, Wolf statue) {
+        if (!CageListener.consumeCage(player)) {
+            player.sendActionBar(Component.text("The cage is gone.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+            return;
+        }
+        statue.addScoreboardTag(TAG_173_CAGED);
+        statue.getPersistentDataContainer().set(ownerKey, PersistentDataType.STRING,
+            player.getUniqueId().toString());
+        Location at = statue.getLocation().clone();
+        at.setPitch(0);
+        ItemDisplay cage = spawnModel(at, Material.IRON_BARS, "scp173_cage3d", 2.35f, 0.45f);
+        cage.addScoreboardTag(TAG_CAGE3D);
+        statue.addPassenger(cage);
+        statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_ANVIL_LAND, 0.9f, 1.2f);
+        statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_IRON_DOOR_CLOSE, 1f, 0.7f);
+        player.sendActionBar(Component.text("SCP-173 is contained. It follows you now.",
+            NamedTextColor.GRAY, TextDecoration.ITALIC));
+    }
+
+    /** Sneak + empty hand on a caged statue: the cage comes off. */
+    public void uncage(Player player, Wolf statue) {
+        statue.removeScoreboardTag(TAG_173_CAGED);
+        statue.getPersistentDataContainer().remove(ownerKey);
+        for (Entity passenger : new ArrayList<>(statue.getPassengers())) {
+            if (passenger.getScoreboardTags().contains(TAG_CAGE3D)) {
+                passenger.remove();
+            }
+        }
+        player.getInventory().addItem(CageListener.makeCage()).values()
+            .forEach(left -> player.getWorld().dropItemNaturally(player.getLocation(), left));
+        statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_IRON_DOOR_OPEN, 1f, 0.6f);
+        player.sendActionBar(Component.text("It is watching you.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+    }
+
     // ------------------------------------------------------------- SCP-106
 
     private void tick106(ItemDisplay body) {
+        // Breached 106 has extra privileges: rarely, he steps out of the floor
+        // right beneath a random unsuspecting player.
+        if (tick % 600 == 0 && plugin.getConfig().getBoolean("breach.106", false)
+            && ThreadLocalRandom.current().nextDouble()
+               < plugin.getConfig().getDouble("scp106.ambush-chance", 0.08)) {
+            ambush(body);
+        }
         Player target = body.getLocation().getNearbyPlayers(40).stream()
             .filter(this::isFairGame)
             .min((a, b) -> Double.compare(
@@ -178,7 +318,6 @@ public final class ScpTask implements Runnable {
             if (partner != null) partner.teleport(loc.clone().subtract(0, 0.9, 0));
             if (distance < 1.2) touch106(body, target);
         }
-        // corrosion trail + occasional groan
         if (tick % 4 == 0) {
             body.getWorld().spawnParticle(Particle.SQUID_INK, loc, 3, 0.25, 0.6, 0.25, 0.01);
             body.getWorld().spawnParticle(Particle.ASH, loc, 6, 0.3, 0.6, 0.3, 0);
@@ -186,9 +325,26 @@ public final class ScpTask implements Runnable {
         if (tick % 160 == 0) {
             body.getWorld().playSound(loc, Sound.ENTITY_ELDER_GUARDIAN_AMBIENT_LAND, 1.2f, 0.35f);
         }
-        // two-frame shuffle animation
         String frame = (tick % 20 < 10) ? "scp106_walk1" : "scp106_walk2";
         setModel(body, Material.BLACK_CONCRETE, frame);
+    }
+
+    /** Teleport beneath a random player in the same world. No warning given. */
+    private void ambush(ItemDisplay body) {
+        List<Player> candidates = body.getWorld().getPlayers().stream()
+            .filter(this::isFairGame)
+            .filter(p -> p.getLocation().distanceSquared(body.getLocation()) > 64)
+            .toList();
+        if (candidates.isEmpty()) return;
+        Player unlucky = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
+        Location dest = unlucky.getLocation().clone().add(0, 0.1, 0);
+        dest.setPitch(0);
+        body.teleport(dest.clone().add(0, 0.9, 0));
+        Interaction partner = partnerOf(body);
+        if (partner != null) partner.teleport(dest);
+        dest.getWorld().spawnParticle(Particle.SQUID_INK, dest.clone().add(0, 0.6, 0), 50, 0.4, 0.7, 0.4, 0.03);
+        dest.getWorld().playSound(dest, Sound.ENTITY_ELDER_GUARDIAN_CURSE, 1.5f, 0.35f);
+        dest.getWorld().playSound(dest, Sound.BLOCK_SCULK_SHRIEKER_SHRIEK, 0.8f, 0.4f);
     }
 
     private Interaction partnerOf(ItemDisplay body) {
@@ -208,8 +364,49 @@ public final class ScpTask implements Runnable {
         Location pd = plugin.pocketDimension();
         if (pd != null && victim.isValid() && !victim.isDead()) {
             victim.teleport(pd);
-            victim.sendActionBar(Component.text("The world corrodes away.", NamedTextColor.GRAY, net.kyori.adventure.text.format.TextDecoration.ITALIC));
+            victim.sendActionBar(Component.text("The world corrodes away.", NamedTextColor.GRAY, TextDecoration.ITALIC));
         }
+    }
+
+    // ------------------------------------------------------------- breaches
+
+    /** While SCP-106's containment is breached, he emerges near random players. */
+    private void tickBreachSpawns() {
+        if (!plugin.getConfig().getBoolean("breach.106", false)) return;
+        long present = Bukkit.getWorlds().stream()
+            .flatMap(w -> w.getEntitiesByClass(ItemDisplay.class).stream())
+            .filter(d -> d.getScoreboardTags().contains(TAG_106))
+            .count();
+        if (present >= plugin.getConfig().getInt("scp106.breach-max", 2)) return;
+        if (ThreadLocalRandom.current().nextDouble() > 0.35) return;
+        List<Player> candidates = Bukkit.getOnlinePlayers().stream()
+            .filter(this::isFairGame).map(p -> (Player) p).toList();
+        if (candidates.isEmpty()) return;
+        Player unlucky = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
+        double angle = ThreadLocalRandom.current().nextDouble(Math.PI * 2);
+        double reach = 8 + ThreadLocalRandom.current().nextDouble(6);
+        Location at = unlucky.getLocation().clone()
+            .add(Math.cos(angle) * reach, 0, Math.sin(angle) * reach);
+        spawn106(at);
+        at.getWorld().spawnParticle(Particle.SQUID_INK, at.clone().add(0, 1, 0), 40, 0.4, 0.8, 0.4, 0.02);
+        at.getWorld().playSound(at, Sound.ENTITY_ELDER_GUARDIAN_CURSE, 1.4f, 0.4f);
+    }
+
+    /** Removes every SCP-106 (recontainment): they corrode back into the floor. */
+    public int recontain106() {
+        int removed = 0;
+        for (World world : Bukkit.getWorlds()) {
+            for (ItemDisplay display : new ArrayList<>(world.getEntitiesByClass(ItemDisplay.class))) {
+                if (!display.getScoreboardTags().contains(TAG_106)) continue;
+                Interaction partner = partnerOf(display);
+                if (partner != null) partner.remove();
+                display.getWorld().spawnParticle(Particle.SQUID_INK,
+                    display.getLocation(), 30, 0.3, 0.8, 0.3, 0.02);
+                display.remove();
+                removed++;
+            }
+        }
+        return removed;
     }
 
     // ------------------------------------------------------------- spawning
@@ -231,6 +428,13 @@ public final class ScpTask implements Runnable {
         });
         ItemDisplay display = spawnModel(location, Material.DIORITE, "scp173", 2.0f, 0.45f);
         statue.addPassenger(display);
+        Interaction hitbox = location.getWorld().spawn(location, Interaction.class, i -> {
+            i.setInteractionWidth(1.0f);
+            i.setInteractionHeight(1.9f);
+            i.setPersistent(true);
+            i.addScoreboardTag(TAG_173_HITBOX);
+        });
+        statue.addPassenger(hitbox);
     }
 
     public void spawn106(Location location) {

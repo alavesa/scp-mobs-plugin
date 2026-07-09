@@ -29,6 +29,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         blink.setEnabled(getConfig().getBoolean("blink.enabled", true));
         task = new ScpTask(this, blink);
         getServer().getPluginManager().registerEvents(this, this);
+        getServer().getPluginManager().registerEvents(new CageListener(task), this);
         getServer().getScheduler().runTaskTimer(this, () -> blink.tick(), 20L, 1L);
         getServer().getScheduler().runTaskTimer(this, task, 40L, 2L);
         getLogger().info("ScpMobs enabled - blink " + (blink.isEnabled() ? "on" : "off"));
@@ -38,6 +39,10 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         getConfig().addDefault("blink.enabled", true);
         getConfig().addDefault("scp106.speed", 0.22);
         getConfig().addDefault("mobs.target-creative", false);
+        getConfig().addDefault("breach.173", false);
+        getConfig().addDefault("breach.106", false);
+        getConfig().addDefault("scp106.breach-max", 2);
+        getConfig().addDefault("scp106.ambush-chance", 0.08);
         getConfig().options().copyDefaults(true);
         saveConfig();
     }
@@ -86,6 +91,51 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                         warnCreative(player);
                     }
                     default -> { return error(sender, "Known SCPs: 173, 106"); }
+                }
+                return true;
+            }
+            case "give" -> {
+                if (args.length < 2 || !args[1].equalsIgnoreCase("cage")) {
+                    return error(sender, "/scpmob give cage [player]");
+                }
+                Player target = args.length >= 3 ? Bukkit.getPlayerExact(args[2])
+                    : (sender instanceof Player p ? p : null);
+                if (target == null) return error(sender, "Player not found.");
+                target.getInventory().addItem(CageListener.makeCage()).values()
+                    .forEach(left -> target.getWorld().dropItemNaturally(target.getLocation(), left));
+                sender.sendMessage(Component.text("Gave a 173 Cage to " + target.getName()
+                    + ". Hold right-click on the statue for 15 seconds - and bring a friend who can keep their eyes open.",
+                    NamedTextColor.GRAY));
+                return true;
+            }
+            case "breach", "contain" -> {
+                if (args.length < 2) return usage(sender);
+                boolean breach = args[0].equalsIgnoreCase("breach");
+                List<String> which = switch (args[1]) {
+                    case "173" -> List.of("173");
+                    case "106" -> List.of("106");
+                    case "all" -> List.of("173", "106");
+                    default -> List.of();
+                };
+                if (which.isEmpty()) return error(sender, "Use 173, 106 or all.");
+                for (String scp : which) {
+                    getConfig().set("breach." + scp, breach);
+                    if (!breach && scp.equals("106")) {
+                        int gone = task.recontain106();
+                        if (gone > 0) sender.sendMessage(Component.text(
+                            gone + " instance(s) of SCP-106 corroded away.", NamedTextColor.GRAY));
+                    }
+                    announce(scp, breach);
+                }
+                saveConfig();
+                return true;
+            }
+            case "status" -> {
+                for (String scp : List.of("173", "106")) {
+                    boolean breached = getConfig().getBoolean("breach." + scp, false);
+                    sender.sendMessage(Component.text("SCP-" + scp + ": "
+                        + (breached ? "CONTAINMENT BREACHED" : "contained"),
+                        breached ? NamedTextColor.RED : NamedTextColor.GREEN));
                 }
                 return true;
             }
@@ -141,16 +191,32 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         return switch (args.length) {
-            case 1 -> Stream.of("spawn", "remove", "pd", "blink")
+            case 1 -> Stream.of("spawn", "give", "remove", "pd", "blink", "breach", "contain", "status")
                 .filter(o -> o.startsWith(args[0].toLowerCase())).toList();
             case 2 -> switch (args[0].toLowerCase()) {
                 case "spawn" -> Stream.of("173", "106").filter(o -> o.startsWith(args[1])).toList();
+                case "give" -> Stream.of("cage").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
+                case "breach", "contain" -> Stream.of("173", "106", "all").filter(o -> o.startsWith(args[1])).toList();
                 case "pd" -> Stream.of("set", "clear").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 case "blink" -> Stream.of("on", "off").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 default -> List.of();
             };
             default -> List.of();
         };
+    }
+
+    private void announce(String scp, boolean breach) {
+        var title = net.kyori.adventure.title.Title.title(
+            Component.text(breach ? "CONTAINMENT BREACH" : "CONTAINMENT RESTORED",
+                breach ? NamedTextColor.DARK_RED : NamedTextColor.GREEN),
+            Component.text("SCP-" + scp + (breach ? " has left containment." : " is secured."),
+                NamedTextColor.GRAY));
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            online.showTitle(title);
+            online.playSound(online.getLocation(),
+                breach ? org.bukkit.Sound.ENTITY_ELDER_GUARDIAN_CURSE : org.bukkit.Sound.BLOCK_BEACON_ACTIVATE,
+                1f, breach ? 0.5f : 1f);
+        }
     }
 
     private void warnCreative(Player player) {
@@ -164,7 +230,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private boolean usage(CommandSender sender) {
         sender.sendMessage(Component.text(
-            "/scpmob spawn <173|106> | remove | pd set|clear | blink on|off", NamedTextColor.AQUA));
+            "/scpmob spawn <173|106> | give cage [player] | breach|contain <173|106|all> | status | remove | pd set|clear | blink on|off", NamedTextColor.AQUA));
         return true;
     }
 

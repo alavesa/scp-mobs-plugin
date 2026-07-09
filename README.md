@@ -50,6 +50,33 @@ model, so it navigates corridors and stairs like anything alive:
   victim is teleported there. `/scpmob pd clear` reverts to pure corrosion damage.
 - unkillable. Attacks pass through him.
 
+## The 173 Cage
+
+`/scpmob give cage` — a hand-held containment cage with its own item texture. To
+contain the statue: **hold right-click on SCP-173 with the cage for 15 seconds**.
+Let go and the attempt resets. Succeed and a **3D cage model locks around the
+statue** — a caged 173 is docile and **follows its captor anywhere** like on a lead,
+rattling softly. Sneak + empty hand takes the cage off (and then it is very much not
+docile).
+
+Fine print your D-class will discover: the blink meter keeps running while you hold
+the cage. Fifteen seconds is always long enough to blink at least once. Bring a
+friend who watches the statue while you work.
+
+## Containment status & breaches
+
+Every SCP has a **contained / breached** status (`/scpmob status`):
+
+- `/scpmob breach 106` — facility-wide CONTAINMENT BREACH announcement, and SCP-106
+  starts **emerging near random players on his own** (every ~30 s there is a small
+  chance, capped at `scp106.breach-max` instances). While breached he also gains his
+  signature move: **rarely, he teleports out of the floor directly beneath a random
+  unsuspecting player** (`scp106.ambush-chance`, default 8% per half-minute — rare,
+  as it should be).
+- `/scpmob contain 106` — recontainment: announcement, and every 106 corrodes away.
+- `/scpmob breach|contain 173|all` — same statuses for the statue (no auto-spawns;
+  it breaches the old-fashioned way: someone stops looking).
+
 ## Custom models & animations
 
 The models are item_displays with `custom_model_data` strings, same override pattern
@@ -68,8 +95,9 @@ models are original pixel-art interpretations built from generated textures.
 ## Commands (`scpmobs.admin`, default op)
 
 ```
-/scpmob spawn <173|106>   /scpmob remove        (within 16 blocks)
-/scpmob pd set|clear      /scpmob blink on|off
+/scpmob spawn <173|106>      /scpmob give cage [player]
+/scpmob breach <173|106|all> /scpmob contain <173|106|all>   /scpmob status
+/scpmob remove (16 blocks)   /scpmob pd set|clear            /scpmob blink on|off
 ```
 
 ## Notes
