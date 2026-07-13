@@ -1,14 +1,14 @@
 name: ScpMobs
-version: '0.4.0'
+version: '0.5.0'
 main: fi.alavesa.scpmobs.ScpMobsPlugin
 api-version: '1.21'
 author: Piia Alavesa
-description: Moving SCPs - SCP-173, SCP-106, and the blink meter.
+description: Moving SCPs - SCP-173, SCP-106, SCP-650, SCP-049, SCP-939, SCP-999, and the blink meter.
 commands:
   scpmob:
     description: Spawn and manage SCP mobs
     usage: |
-      /scpmob spawn <173|106>
+      /scpmob spawn <173|106|650|049|939|999>
       /scpmob remove          (SCPs within 16 blocks)
       /scpmob pd set|clear    (SCP-106 pocket dimension at your position)
       /scpmob blink on|off

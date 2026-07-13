@@ -6,11 +6,11 @@
 
   <groupId>fi.alavesa</groupId>
   <artifactId>scp-mobs</artifactId>
-  <version>0.4.0</version>
+  <version>0.5.0</version>
   <packaging>jar</packaging>
 
   <name>ScpMobs</name>
-  <description>Moving SCPs for facility RP servers: SCP-173, SCP-106, and the blink meter.</description>
+  <description>Moving SCPs for facility RP servers: SCP-173, SCP-106, SCP-650, SCP-049, SCP-939, SCP-999, and the blink meter.</description>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>

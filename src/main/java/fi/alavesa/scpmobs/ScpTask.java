@@ -18,12 +18,14 @@ import org.bukkit.entity.Interaction;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Wolf;
+import org.bukkit.entity.Zombie;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.scoreboard.Objective;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
@@ -55,6 +57,24 @@ import java.util.concurrent.ThreadLocalRandom;
  * open, slowed while phasing through solid matter. When his containment is
  * breached he emerges near random players, RISING out of the floor, and
  * rarely teleports directly beneath an unsuspecting victim.
+ *
+ * SCP-650 is the inverse of 173: it never harms anyone. It stands still
+ * while watched and, the moment nobody is looking, silently relocates to a
+ * spot a few blocks BEHIND its nearest target, facing them. The only sound
+ * it ever makes is the little breath a player hears on re-acquiring it.
+ *
+ * SCP-049 walks slowly toward the nearest visible player; its touch starts
+ * a short blind "surgery" that ends in death, and the dead get back up as
+ * SCP-049-2 patients. It never harms its patients or the other SCPs.
+ *
+ * SCP-939 is blind. It hears movement (position deltas between ticks) and
+ * pain, and charges the LAST HEARD POSITION - go quiet and step aside and
+ * it savages the empty spot. While idle it plays a lure that is almost,
+ * but not quite, a human voice. Sneaking players are silent to it.
+ *
+ * SCP-999 is the tickle monster: waddles to the nearest player, squishes
+ * happily, and its aura heals, clears Darkness/Nausea and bleeds the lab
+ * datapack's infection clocks one extra point per second - like the gel.
  */
 public final class ScpTask implements Runnable {
 
@@ -63,6 +83,11 @@ public final class ScpTask implements Runnable {
     public static final String TAG_173_CAGED = "scp.173.caged";
     public static final String TAG_CAGE3D = "scp.cage3d";
     public static final String TAG_106 = "scp.106";
+    public static final String TAG_650 = "scp.650";
+    public static final String TAG_049 = "scp.049";
+    public static final String TAG_049_PATIENT = "scp049.patient";
+    public static final String TAG_939 = "scp.939";
+    public static final String TAG_999 = "scp.999";
     public static final String TAG_DISPLAY = "scp.display";
 
     public static final int CAGING_TICKS = 15 * 20;
@@ -85,7 +110,34 @@ public final class ScpTask implements Runnable {
     private final Map<UUID, Caging> caging = new HashMap<>();
     private final Map<UUID, Set<UUID>> watchers = new HashMap<>();
     private final Map<UUID, Integer> lastHop = new HashMap<>();
+    // SCP-650: armed = has been seen since its last move; startle = who still owes a cue
+    private final Set<UUID> armed650 = new HashSet<>();
+    private final Map<UUID, Set<UUID>> startle650 = new HashMap<>();
+    // SCP-049: victim -> running operation, victim -> reanimation window
+    private final Map<UUID, Surgery> surgeries = new HashMap<>();
+    private final Map<UUID, Integer> condemned = new HashMap<>();
+    private final Map<UUID, Integer> doctorBusy = new HashMap<>();
+    // SCP-939: player position deltas double as its ears
+    private final Map<UUID, Location> lastSeenPos = new HashMap<>();
+    private final Map<UUID, Location> lastNoise = new HashMap<>();
+    private final Map<UUID, Integer> lastNoiseTick = new HashMap<>();
+    private final Map<UUID, Location> heard = new HashMap<>();
+    private final Map<UUID, Integer> heardTick = new HashMap<>();
+    private final Map<UUID, Integer> biteCooldown = new HashMap<>();
+    private final Map<UUID, Integer> nextLure = new HashMap<>();
+    // SCP-999 pacing
+    private final Map<UUID, Integer> nextSquish = new HashMap<>();
+    private final Map<UUID, Integer> nextWander = new HashMap<>();
     private int tick;
+
+    private static final class Surgery {
+        final UUID doctor;
+        final int until;
+        Surgery(UUID doctor, int until) {
+            this.doctor = doctor;
+            this.until = until;
+        }
+    }
 
     public ScpTask(ScpMobsPlugin plugin, BlinkManager blink) {
         this.plugin = plugin;
@@ -98,17 +150,26 @@ public final class ScpTask implements Runnable {
     @Override
     public void run() {
         tick += 2; // scheduled every 2 ticks
+        trackNoise();
         for (World world : Bukkit.getWorlds()) {
             for (Wolf wolf : world.getEntitiesByClass(Wolf.class)) {
-                if (wolf.getScoreboardTags().contains(TAG_173)) tick173(wolf);
+                Set<String> tags = wolf.getScoreboardTags();
+                if (tags.contains(TAG_173)) tick173(wolf);
+                else if (tags.contains(TAG_650)) tick650(wolf);
+                else if (tags.contains(TAG_049)) tick049(wolf);
+                else if (tags.contains(TAG_939)) tick939(wolf);
+                else if (tags.contains(TAG_999)) tick999(wolf);
             }
             for (ItemDisplay display : world.getEntitiesByClass(ItemDisplay.class)) {
                 if (display.getScoreboardTags().contains(TAG_106)) tick106(display);
             }
         }
         tickCaging();
+        tickSurgeries();
         if (tick % 600 == 0) tickBreachSpawns();
         touchCooldown.entrySet().removeIf(e -> e.getValue() < tick);
+        biteCooldown.entrySet().removeIf(e -> e.getValue() < tick);
+        condemned.entrySet().removeIf(e -> e.getValue() < tick);
         if (tick % 100 == 0) sweepOrphans();
     }
 
@@ -532,6 +593,351 @@ public final class ScpTask implements Runnable {
         }
     }
 
+    // ------------------------------------------------------------- SCP-650
+
+    /**
+     * The inverse statue. Watched: frozen. Unwatched: it is suddenly a few
+     * blocks behind its nearest target, facing them, with no sound and no
+     * particles. It never harms anyone - the horror is entirely optical.
+     */
+    private void tick650(Wolf statue) {
+        statue.setAI(false); // it never walks - it is simply elsewhere
+        UUID id = statue.getUniqueId();
+        List<Player> nearby = statue.getLocation().getNearbyPlayers(32).stream()
+            .filter(this::isFairGame)
+            .toList();
+        if (nearby.isEmpty()) {
+            watchers.remove(id);
+            return;
+        }
+        Set<UUID> before = new HashSet<>(watchers.getOrDefault(id, Set.of()));
+        boolean observed = updateWatchers(statue, nearby);
+        if (observed) {
+            armed650.add(id);
+            startleNewWatchers(statue, before);
+            return;
+        }
+        // one silent transfer per sighting - it does not chain-hop while unseen
+        if (!armed650.remove(id)) return;
+        nearby.stream()
+            .min((a, b) -> Double.compare(
+                a.getLocation().distanceSquared(statue.getLocation()),
+                b.getLocation().distanceSquared(statue.getLocation())))
+            .ifPresent(target -> relocate650(statue, target));
+    }
+
+    /** The only sound it ever earns: a quiet breath, per player, per move. */
+    private void startleNewWatchers(Wolf statue, Set<UUID> before) {
+        Set<UUID> pending = startle650.get(statue.getUniqueId());
+        if (pending == null) return;
+        for (UUID watching : watchers.getOrDefault(statue.getUniqueId(), Set.of())) {
+            if (before.contains(watching) || !pending.add(watching)) continue;
+            Player player = Bukkit.getPlayer(watching);
+            if (player != null) {
+                player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_BREATH, 0.5f, 0.65f);
+            }
+        }
+    }
+
+    /** 2-4 blocks straight behind the target, raytraced so it never clips into walls. */
+    private void relocate650(Wolf statue, Player target) {
+        Vector back = target.getEyeLocation().getDirection().setY(0);
+        if (back.lengthSquared() < 1.0e-4) return; // staring straight down - no "behind"
+        back.normalize().multiply(-1);
+        double wanted = 2.0 + ThreadLocalRandom.current().nextDouble(2.0);
+        Location from = target.getLocation().clone().add(0, 0.9, 0);
+        double travel = Math.min(wanted, clearance(statue.getWorld(), from, back, wanted));
+        if (travel < 2.0) return; // no valid spot behind them - it waits
+        Location dest = from.clone().add(back.multiply(travel)).subtract(0, 0.9, 0);
+        for (int i = 0; i < 3 && dest.getBlock().isPassable()
+            && dest.clone().subtract(0, 1, 0).getBlock().isPassable(); i++) {
+            dest.subtract(0, 1, 0);
+        }
+        // needs solid ground and two blocks of headroom, or it skips the move
+        if (!dest.getBlock().isPassable()
+            || !dest.clone().add(0, 1, 0).getBlock().isPassable()
+            || dest.clone().subtract(0, 1, 0).getBlock().isPassable()) {
+            return;
+        }
+        dest.setYaw(yawToward(dest, target.getLocation()));
+        dest.setPitch(0);
+        teleportStatue(statue, dest); // deliberately silent: no sound, no particles
+        startle650.put(statue.getUniqueId(), new HashSet<>());
+    }
+
+    // ------------------------------------------------------------- SCP-049
+
+    /**
+     * The Plague Doctor: a slow deliberate walk toward the nearest visible
+     * player, and a touch that is always lethal - a 2.5s blind "surgery"
+     * beat, then a kill credited to the doctor. The dead rise as SCP-049-2.
+     */
+    private void tick049(Wolf doctor) {
+        prepareWalker(doctor);
+        UUID id = doctor.getUniqueId();
+        Integer busy = doctorBusy.get(id);
+        if (busy != null) {
+            if (tick < busy) { // standing over the patient, working
+                doctor.getPathfinder().stopPathfinding();
+                syncPassengers(doctor);
+                return;
+            }
+            doctorBusy.remove(id);
+        }
+        // only players are ever targets: 049-2 patients and other SCPs are safe
+        Player target = doctor.getLocation().getNearbyPlayers(24).stream()
+            .filter(this::isFairGame)
+            .filter(p -> !surgeries.containsKey(p.getUniqueId())
+                && !condemned.containsKey(p.getUniqueId()))
+            .filter(doctor::hasLineOfSight)
+            .min((a, b) -> Double.compare(
+                a.getLocation().distanceSquared(doctor.getLocation()),
+                b.getLocation().distanceSquared(doctor.getLocation())))
+            .orElse(null);
+        if (target == null) {
+            doctor.getPathfinder().stopPathfinding();
+        } else if (target.getLocation().distanceSquared(doctor.getLocation()) < 2.1) {
+            beginSurgery(doctor, target);
+        } else {
+            doctor.getPathfinder().moveTo(target, 1.0);
+        }
+        syncPassengers(doctor);
+    }
+
+    private void beginSurgery(Wolf doctor, Player victim) {
+        surgeries.put(victim.getUniqueId(), new Surgery(doctor.getUniqueId(), tick + 50));
+        doctorBusy.put(doctor.getUniqueId(), tick + 70);
+        victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 60, 4));
+        victim.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 70, 0));
+        victim.getWorld().playSound(victim.getLocation(), Sound.BLOCK_SCULK_SENSOR_CLICKING, 0.7f, 0.5f);
+        victim.sendActionBar(Component.text("You feel... unclean.",
+            NamedTextColor.GRAY, TextDecoration.ITALIC));
+    }
+
+    /** Runs the operating table: surgeries end, and they end one way. */
+    private void tickSurgeries() {
+        Iterator<Map.Entry<UUID, Surgery>> it = surgeries.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, Surgery> entry = it.next();
+            Player victim = Bukkit.getPlayer(entry.getKey());
+            if (victim == null || !victim.isOnline() || victim.isDead()) {
+                it.remove();
+                continue;
+            }
+            if (tick < entry.getValue().until) continue;
+            it.remove();
+            condemned.put(victim.getUniqueId(), tick + 200);
+            victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_ZOMBIE_INFECT, 0.8f, 0.6f);
+            Entity doctor = Bukkit.getEntity(entry.getValue().doctor);
+            if (doctor != null) victim.damage(1000.0, doctor);
+            else victim.damage(1000.0);
+        }
+    }
+
+    /** Called from the death listener: the doctor's dead get back up. */
+    public void reanimate(Player victim) {
+        Integer window = condemned.remove(victim.getUniqueId());
+        if (window == null || tick > window) return;
+        Location at = victim.getLocation();
+        at.getWorld().spawn(at, Zombie.class, zombie -> {
+            zombie.setAdult();
+            zombie.setPersistent(true);
+            zombie.setRemoveWhenFarAway(false);
+            zombie.setShouldBurnInDay(false);
+            zombie.customName(Component.text("SCP-049-2", NamedTextColor.DARK_GREEN));
+            zombie.setCustomNameVisible(false);
+            zombie.addScoreboardTag(TAG_049_PATIENT);
+        });
+        at.getWorld().playSound(at, Sound.ENTITY_ZOMBIE_AMBIENT, 1.2f, 0.6f);
+    }
+
+    // ------------------------------------------------------------- SCP-939
+
+    private void tick939(Wolf hound) {
+        prepareWalker(hound);
+        UUID id = hound.getUniqueId();
+        listen939(hound);
+        Location target = heard.get(id);
+        if (target != null && (target.getWorld() != hound.getWorld()
+            || tick - heardTick.getOrDefault(id, 0) > 200)) {
+            heard.remove(id);
+            heardTick.remove(id);
+            target = null;
+        }
+        if (target == null) {
+            hound.getPathfinder().stopPathfinding();
+            lure939(hound);
+            syncPassengers(hound);
+            return;
+        }
+        // it hunts the SOUND, not the player - go quiet and it overshoots
+        if (hound.getLocation().distanceSquared(target) > 2.6) {
+            hound.getPathfinder().moveTo(target, 1.0);
+        } else {
+            for (Player prey : hound.getLocation().getNearbyPlayers(2.0)) {
+                if (isFairGame(prey)) bite(hound, prey);
+            }
+            if (tick - heardTick.getOrDefault(id, 0) > 40) { // sniffs, finds nothing, forgets
+                heard.remove(id);
+                heardTick.remove(id);
+            }
+        }
+        syncPassengers(hound);
+    }
+
+    /** It has no eyes. It hears recent movement or pain within 24 blocks. */
+    private void listen939(Wolf hound) {
+        Location best = null;
+        double bestDistSq = 24 * 24;
+        for (Player player : hound.getWorld().getPlayers()) {
+            if (!isFairGame(player)) continue;
+            Integer at = lastNoiseTick.get(player.getUniqueId());
+            if (at == null || tick - at > 2) continue;
+            Location noise = lastNoise.get(player.getUniqueId());
+            if (noise == null || noise.getWorld() != hound.getWorld()) continue;
+            double d = noise.distanceSquared(hound.getLocation());
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                best = noise;
+            }
+        }
+        if (best != null) {
+            heard.put(hound.getUniqueId(), best.clone());
+            heardTick.put(hound.getUniqueId(), tick);
+        }
+    }
+
+    private void bite(Wolf hound, Player prey) {
+        Integer until = biteCooldown.get(prey.getUniqueId());
+        if (until != null && until > tick) return;
+        biteCooldown.put(prey.getUniqueId(), tick + 24);
+        prey.damage(6.0, hound);
+        prey.getWorld().playSound(prey.getLocation(), Sound.ENTITY_FOX_BITE, 1f, 0.55f);
+    }
+
+    /** Every 15-30 idle seconds: something that is almost a voice. */
+    private void lure939(Wolf hound) {
+        UUID id = hound.getUniqueId();
+        Integer next = nextLure.get(id);
+        if (next == null) {
+            nextLure.put(id, tick + 300 + ThreadLocalRandom.current().nextInt(300));
+            return;
+        }
+        if (tick < next) return;
+        nextLure.put(id, tick + 300 + ThreadLocalRandom.current().nextInt(300));
+        hound.getWorld().playSound(hound.getLocation(), Sound.ENTITY_VILLAGER_AMBIENT, 0.8f,
+            0.5f + ThreadLocalRandom.current().nextFloat() * 0.2f);
+    }
+
+    /**
+     * Position deltas double as SCP-939's ears. Sneaking is silent - even
+     * sneak-walking - so stillness or a crouch is genuine invisibility.
+     */
+    private void trackNoise() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            Location now = player.getLocation();
+            Location prev = lastSeenPos.put(player.getUniqueId(), now.clone());
+            if (prev == null || prev.getWorld() != now.getWorld()) continue;
+            double dx = now.getX() - prev.getX();
+            double dz = now.getZ() - prev.getZ();
+            double dy = now.getY() - prev.getY();
+            if (!player.isSneaking() && (dx * dx + dz * dz > 0.0036 || dy > 0.25)) {
+                registerNoise(player);
+            }
+        }
+    }
+
+    /** Also called from the damage listener: pain is loud. */
+    public void registerNoise(Player player) {
+        lastNoise.put(player.getUniqueId(), player.getLocation().clone());
+        lastNoiseTick.put(player.getUniqueId(), tick);
+    }
+
+    // ------------------------------------------------------------- SCP-999
+
+    private void tick999(Wolf blob) {
+        prepareWalker(blob);
+        UUID id = blob.getUniqueId();
+        Player friend = blob.getLocation().getNearbyPlayers(8).stream()
+            .filter(this::isFairGame)
+            .min((a, b) -> Double.compare(
+                a.getLocation().distanceSquared(blob.getLocation()),
+                b.getLocation().distanceSquared(blob.getLocation())))
+            .orElse(null);
+        if (friend != null) {
+            if (friend.getLocation().distanceSquared(blob.getLocation()) > 4.8) {
+                blob.getPathfinder().moveTo(friend, 1.0);
+            } else {
+                blob.getPathfinder().stopPathfinding();
+            }
+            Integer next = nextSquish.get(id);
+            if (next == null || tick >= next) {
+                nextSquish.put(id, tick + 60 + ThreadLocalRandom.current().nextInt(60));
+                blob.getWorld().playSound(blob.getLocation(), Sound.ENTITY_SLIME_SQUISH, 0.5f,
+                    1.2f + ThreadLocalRandom.current().nextFloat() * 0.4f);
+            }
+        } else {
+            Integer next = nextWander.get(id);
+            if (next == null || tick >= next) {
+                nextWander.put(id, tick + 120 + ThreadLocalRandom.current().nextInt(120));
+                Location stroll = blob.getLocation().add(
+                    ThreadLocalRandom.current().nextInt(-5, 6), 0,
+                    ThreadLocalRandom.current().nextInt(-5, 6));
+                blob.getPathfinder().moveTo(stroll, 0.8);
+            }
+        }
+        if (tick % 20 == 0) {
+            for (Player player : blob.getLocation().getNearbyPlayers(3)) {
+                soothe(player);
+            }
+        }
+        syncPassengers(blob);
+    }
+
+    /**
+     * The aura, once per second: Regeneration I, clears Darkness and Nausea,
+     * and bleeds the lab datapack's infection clocks by one extra point -
+     * the same trick the gel item does. The objectives may not exist if the
+     * lab datapack isn't installed, so every lookup is null-guarded.
+     */
+    private void soothe(Player player) {
+        player.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 45, 0, true, false));
+        player.removePotionEffect(PotionEffectType.DARKNESS);
+        player.removePotionEffect(PotionEffectType.NAUSEA);
+        var board = Bukkit.getScoreboardManager().getMainScoreboard();
+        for (String infection : List.of("lab.inf", "lab.cola", "lab.z008")) {
+            Objective objective = board.getObjective(infection);
+            if (objective == null) continue;
+            var score = objective.getScore(player.getName());
+            if (score.isScoreSet() && score.getScore() > 0) {
+                score.setScore(score.getScore() - 1);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- walkers
+
+    /**
+     * Walkers steer through the Pathfinder API. Aware stays TRUE because
+     * unaware mobs do not tick navigation at all; vanilla wandering is
+     * stopped by stripping every AI goal instead - re-stripped each tick,
+     * because goal registration comes back whenever the entity reloads.
+     */
+    private void prepareWalker(Wolf mob) {
+        if (!mob.hasAI()) mob.setAI(true);
+        Bukkit.getMobGoals().removeAllGoals(mob);
+    }
+
+    /** A player left: drop every per-player breadcrumb we keep. */
+    public void forget(UUID player) {
+        lastSeenPos.remove(player);
+        lastNoise.remove(player);
+        lastNoiseTick.remove(player);
+        surgeries.remove(player);
+        condemned.remove(player);
+        biteCooldown.remove(player);
+    }
+
     // ------------------------------------------------------------- breaches
 
     /** While SCP-106's containment is breached, he emerges near random players. */
@@ -577,19 +983,7 @@ public final class ScpTask implements Runnable {
     public void spawn173(Location location) {
         location = location.clone();
         location.setPitch(0);
-        Wolf statue = location.getWorld().spawn(location, Wolf.class, wolf -> {
-            wolf.setAdult();
-            wolf.setInvisible(true);
-            wolf.setSilent(true);
-            wolf.setPersistent(true);
-            wolf.setRemoveWhenFarAway(false);
-            wolf.setAI(false);
-            wolf.customName(Component.text("SCP-173", NamedTextColor.RED));
-            wolf.setCustomNameVisible(false);
-            wolf.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(0.45);
-            wolf.getAttribute(Attribute.FOLLOW_RANGE).setBaseValue(48);
-            wolf.addScoreboardTag(TAG_173);
-        });
+        Wolf statue = spawnScpWolf(location, TAG_173, "SCP-173", 0.45, false);
         ItemDisplay display = spawnModel(location, Material.DIORITE, "scp173", 2.0f, 0.45f);
         statue.addPassenger(display);
         Interaction hitbox = location.getWorld().spawn(location, Interaction.class, i -> {
@@ -599,6 +993,52 @@ public final class ScpTask implements Runnable {
             i.addScoreboardTag(TAG_173_HITBOX);
         });
         statue.addPassenger(hitbox);
+    }
+
+    public void spawn650(Location location) {
+        location = location.clone();
+        location.setPitch(0);
+        Wolf statue = spawnScpWolf(location, TAG_650, "SCP-650", 0.45, false);
+        statue.addPassenger(spawnModel(location, Material.COAL_BLOCK, "scp650", 2.1f, 0.5f));
+    }
+
+    public void spawn049(Location location) {
+        location = location.clone();
+        location.setPitch(0);
+        Wolf doctor = spawnScpWolf(location, TAG_049, "SCP-049", 0.18, true);
+        doctor.addPassenger(spawnModel(location, Material.BLACK_WOOL, "scp049", 2.0f, 0.45f));
+    }
+
+    public void spawn939(Location location) {
+        location = location.clone();
+        location.setPitch(0);
+        Wolf hound = spawnScpWolf(location, TAG_939, "SCP-939", 0.32, true);
+        hound.addPassenger(spawnModel(location, Material.RED_CONCRETE, "scp939", 1.7f, 0.3f));
+    }
+
+    public void spawn999(Location location) {
+        location = location.clone();
+        location.setPitch(0);
+        Wolf blob = spawnScpWolf(location, TAG_999, "SCP-999", 0.18, true);
+        blob.addPassenger(spawnModel(location, Material.ORANGE_CONCRETE, "scp999", 1.5f, 0.25f));
+    }
+
+    /** The invisible wolf every walking/standing SCP rides on. Location is pitch-0. */
+    private Wolf spawnScpWolf(Location location, String tag, String name, double speed, boolean walks) {
+        return location.getWorld().spawn(location, Wolf.class, wolf -> {
+            wolf.setAdult();
+            wolf.setInvisible(true);
+            wolf.setSilent(true);
+            wolf.setPersistent(true);
+            wolf.setRemoveWhenFarAway(false);
+            wolf.setAI(walks);
+            wolf.customName(Component.text(name, NamedTextColor.RED));
+            wolf.setCustomNameVisible(false);
+            wolf.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(speed);
+            wolf.getAttribute(Attribute.FOLLOW_RANGE).setBaseValue(48);
+            wolf.addScoreboardTag(tag);
+            if (walks) Bukkit.getMobGoals().removeAllGoals(wolf);
+        });
     }
 
     public ItemDisplay spawn106(Location location) {
