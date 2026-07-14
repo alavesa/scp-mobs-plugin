@@ -84,7 +84,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         if (!(event.getDamager() instanceof Player player)) return;
         event.getEntity().getWorld().playSound(event.getEntity().getLocation(),
             org.bukkit.Sound.ENTITY_SLIME_SQUISH, 0.8f, 1.6f);
-        player.sendActionBar(Component.text("It giggles.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+        Msg.actionbar(player, Component.text("It giggles.", NamedTextColor.GRAY, TextDecoration.ITALIC));
     }
 
     // Dying under SCP-049's hands is not the end of the story.

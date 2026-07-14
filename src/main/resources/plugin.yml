@@ -1,6 +1,7 @@
 name: ScpMobs
-version: '0.5.0'
+version: '0.5.1'
 main: fi.alavesa.scpmobs.ScpMobsPlugin
+softdepend: [Labra]
 api-version: '1.21'
 author: Piia Alavesa
 description: Moving SCPs - SCP-173, SCP-106, SCP-650, SCP-049, SCP-939, SCP-999, and the blink meter.

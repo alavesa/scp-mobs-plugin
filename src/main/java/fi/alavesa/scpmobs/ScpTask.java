@@ -419,7 +419,7 @@ public final class ScpTask implements Runnable {
             if (player == null || !player.isOnline()) { it.remove(); continue; }
             if (tick - session.lastHeld > 8) {
                 it.remove();
-                player.sendActionBar(Component.text("The cage slips.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+                Msg.actionbar(player, Component.text("The cage slips.", NamedTextColor.GRAY, TextDecoration.ITALIC));
                 continue;
             }
             if (!(Bukkit.getEntity(session.statue) instanceof Wolf statue) || statue.isDead()) {
@@ -429,7 +429,7 @@ public final class ScpTask implements Runnable {
             session.progress += 2;
             if (session.progress % 20 == 0) {
                 int left = (CAGING_TICKS - session.progress) / 20 + 1;
-                player.sendActionBar(Component.text("Caging SCP-173... " + left + "s",
+                Msg.actionbar(player, Component.text("Caging SCP-173... " + left + "s",
                     NamedTextColor.GRAY, TextDecoration.ITALIC));
                 player.playSound(player.getLocation(), Sound.ITEM_CROSSBOW_LOADING_MIDDLE, 0.6f, 0.8f);
             }
@@ -442,7 +442,7 @@ public final class ScpTask implements Runnable {
 
     private void completeCaging(Player player, Wolf statue) {
         if (!CageListener.consumeCage(player)) {
-            player.sendActionBar(Component.text("The cage is gone.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+            Msg.actionbar(player, Component.text("The cage is gone.", NamedTextColor.GRAY, TextDecoration.ITALIC));
             return;
         }
         statue.addScoreboardTag(TAG_173_CAGED);
@@ -455,7 +455,7 @@ public final class ScpTask implements Runnable {
         statue.addPassenger(cage);
         statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_ANVIL_LAND, 0.9f, 1.2f);
         statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_IRON_DOOR_CLOSE, 1f, 0.7f);
-        player.sendActionBar(Component.text("SCP-173 is contained. It follows you now.",
+        Msg.actionbar(player, Component.text("SCP-173 is contained. It follows you now.",
             NamedTextColor.GRAY, TextDecoration.ITALIC));
     }
 
@@ -471,7 +471,7 @@ public final class ScpTask implements Runnable {
         player.getInventory().addItem(CageListener.makeCage()).values()
             .forEach(left -> player.getWorld().dropItemNaturally(player.getLocation(), left));
         statue.getWorld().playSound(statue.getLocation(), Sound.BLOCK_IRON_DOOR_OPEN, 1f, 0.6f);
-        player.sendActionBar(Component.text("It is watching you.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+        Msg.actionbar(player, Component.text("It is watching you.", NamedTextColor.GRAY, TextDecoration.ITALIC));
     }
 
     // ------------------------------------------------------------- SCP-106
@@ -589,7 +589,7 @@ public final class ScpTask implements Runnable {
         Location pd = plugin.pocketDimension();
         if (pd != null && victim.isValid() && !victim.isDead()) {
             victim.teleport(pd);
-            victim.sendActionBar(Component.text("The world corrodes away.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+            Msg.actionbar(victim, Component.text("The world corrodes away.", NamedTextColor.GRAY, TextDecoration.ITALIC));
         }
     }
 
@@ -710,7 +710,7 @@ public final class ScpTask implements Runnable {
         victim.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 60, 4));
         victim.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 70, 0));
         victim.getWorld().playSound(victim.getLocation(), Sound.BLOCK_SCULK_SENSOR_CLICKING, 0.7f, 0.5f);
-        victim.sendActionBar(Component.text("You feel... unclean.",
+        Msg.actionbar(victim, Component.text("You feel... unclean.",
             NamedTextColor.GRAY, TextDecoration.ITALIC));
     }
 
