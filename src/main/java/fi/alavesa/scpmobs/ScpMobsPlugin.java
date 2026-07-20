@@ -69,9 +69,11 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
             boolean fresh = !root.exists();
             new File(root, "data/scp/dimension_type").mkdirs();
             new File(root, "data/scp/dimension").mkdirs();
-            writeIfAbsent(new File(root, "pack.mcmeta"), PACK_MCMETA);
-            writeIfAbsent(new File(root, "data/scp/dimension_type/pocket.json"), DIM_TYPE_JSON);
-            writeIfAbsent(new File(root, "data/scp/dimension/pocket.json"), DIM_JSON);
+            // Overwrite the plugin-owned definition every enable so schema fixes
+            // (e.g. new required keys on a newer MC) self-heal on the next boot.
+            write(new File(root, "pack.mcmeta"), PACK_MCMETA);
+            write(new File(root, "data/scp/dimension_type/pocket.json"), DIM_TYPE_JSON);
+            write(new File(root, "data/scp/dimension/pocket.json"), DIM_JSON);
             if (fresh || pocketWorld() == null) {
                 getLogger().warning("SCP-106 pocket dimension datapack installed at "
                     + root.getPath() + " - RESTART the server once to register the 'scp:pocket' dimension.");
@@ -81,9 +83,13 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void writeIfAbsent(File f, String content) throws java.io.IOException {
-        if (f.exists()) return;
-        Files.write(f.toPath(), content.getBytes(StandardCharsets.UTF_8));
+    private void write(File f, String content) throws java.io.IOException {
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        if (f.exists() && f.length() == bytes.length) {
+            // cheap "unchanged" check - skip rewriting identical content
+            if (java.util.Arrays.equals(Files.readAllBytes(f.toPath()), bytes)) return;
+        }
+        Files.write(f.toPath(), bytes);
     }
 
     private static final String PACK_MCMETA =
@@ -100,6 +106,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
           "has_raids": false,
           "has_skylight": false,
           "has_ceiling": false,
+          "has_ender_dragon_fight": false,
           "coordinate_scale": 1.0,
           "ambient_light": 0.05,
           "logical_height": 256,
