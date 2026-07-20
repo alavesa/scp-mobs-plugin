@@ -64,6 +64,38 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
             (float) getConfig().getDouble("pd.yaw"), 0f);
     }
 
+    /** The real ways OUT of the pocket dimension. Reaching one escapes; if none
+     *  are set the PD has no exit (the old "just corrode away" behaviour). */
+    public java.util.List<Location> pocketExits() {
+        java.util.List<Location> out = new java.util.ArrayList<>();
+        for (String s : getConfig().getStringList("pd.exits")) {
+            String[] p = s.split(",");
+            if (p.length < 4) continue;
+            var w = Bukkit.getWorld(p[0]);
+            if (w == null) continue;
+            try {
+                out.add(new Location(w, Double.parseDouble(p[1]),
+                    Double.parseDouble(p[2]), Double.parseDouble(p[3])));
+            } catch (NumberFormatException ignored) { }
+        }
+        return out;
+    }
+
+    public void addPocketExit(Location l) {
+        java.util.List<String> list = getConfig().getStringList("pd.exits");
+        list.add(l.getWorld().getName() + "," + l.getX() + "," + l.getY() + "," + l.getZ());
+        getConfig().set("pd.exits", list);
+        saveConfig();
+    }
+
+    public void clearPocketExits() {
+        getConfig().set("pd.exits", null);
+        saveConfig();
+    }
+
+    public double pocketExitRadius() { return getConfig().getDouble("pd.exit-radius", 2.5); }
+    public int pocketEscapeSeconds() { return getConfig().getInt("pd.escape-seconds", 90); }
+
     // SCPs cannot be harmed; the statue must never burn or drown either.
     @EventHandler
     public void onDamage(EntityDamageEvent event) {
@@ -238,6 +270,32 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                         NamedTextColor.GRAY));
                     return true;
                 }
+                if (args[1].equalsIgnoreCase("clearexits")) {
+                    clearPocketExits();
+                    sender.sendMessage(Component.text("Pocket dimension exits cleared - no way out remains.",
+                        NamedTextColor.GRAY));
+                    return true;
+                }
+                if (args[1].equalsIgnoreCase("exit")) {
+                    if (!(sender instanceof Player p2)) return error(sender, "Players only.");
+                    addPocketExit(p2.getLocation());
+                    sender.sendMessage(Component.text("Added a pocket-dimension exit here (now "
+                        + pocketExits().size() + " total). Reach within " + pocketExitRadius()
+                        + " blocks to escape.", NamedTextColor.GRAY));
+                    return true;
+                }
+                if (args[1].equalsIgnoreCase("time")) {
+                    if (args.length < 3) return error(sender, "Usage: /scpmob pd time <seconds>");
+                    int secs;
+                    try { secs = Integer.parseInt(args[2]); }
+                    catch (NumberFormatException e) { return error(sender, "Not a number: " + args[2]); }
+                    secs = Math.max(5, Math.min(600, secs));
+                    getConfig().set("pd.escape-seconds", secs);
+                    saveConfig();
+                    sender.sendMessage(Component.text("Pocket-dimension escape time set to " + secs
+                        + " seconds.", NamedTextColor.GRAY));
+                    return true;
+                }
                 if (!(sender instanceof Player player)) return error(sender, "Players only.");
                 Location at = player.getLocation();
                 getConfig().set("pd.world", at.getWorld().getName());
@@ -272,7 +330,8 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                     .filter(o -> o.startsWith(args[1])).toList();
                 case "give" -> Stream.of("cage").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 case "breach", "contain" -> Stream.of("173", "106", "all").filter(o -> o.startsWith(args[1])).toList();
-                case "pd" -> Stream.of("set", "clear").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
+                case "pd" -> Stream.of("set", "clear", "exit", "clearexits", "time")
+                    .filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 case "blink" -> Stream.of("on", "off").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 default -> List.of();
             };
@@ -305,7 +364,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private boolean usage(CommandSender sender) {
         sender.sendMessage(Component.text(
-            "/scpmob spawn <173|106|650|049|939|999> | give cage [player] | breach|contain <173|106|all> | status | remove | pd set|clear | blink on|off", NamedTextColor.AQUA));
+            "/scpmob spawn <173|106|650|049|939|999> | give cage [player] | breach|contain <173|106|all> | status | remove | pd set|clear|exit|clearexits|time <s> | blink on|off", NamedTextColor.AQUA));
         return true;
     }
 

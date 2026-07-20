@@ -128,7 +128,12 @@ public final class ScpTask implements Runnable {
     // SCP-999 pacing
     private final Map<UUID, Integer> nextSquish = new HashMap<>();
     private final Map<UUID, Integer> nextWander = new HashMap<>();
+    /** Players currently lost in SCP-106's pocket dimension, with their way home. */
+    private final Map<UUID, PdSession> pdSessions = new HashMap<>();
     private int tick;
+
+    /** A victim's stay in the pocket dimension: where they came from and when it runs out. */
+    private record PdSession(Location returnLoc, int deadline) { }
 
     private static final class Surgery {
         final UUID doctor;
@@ -166,6 +171,7 @@ public final class ScpTask implements Runnable {
         }
         tickCaging();
         tickSurgeries();
+        if (!pdSessions.isEmpty()) tickPocket();
         if (tick % 600 == 0) tickBreachSpawns();
         touchCooldown.entrySet().removeIf(e -> e.getValue() < tick);
         biteCooldown.entrySet().removeIf(e -> e.getValue() < tick);
@@ -587,9 +593,73 @@ public final class ScpTask implements Runnable {
         victim.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 100, 0));
         victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 0.4f);
         Location pd = plugin.pocketDimension();
-        if (pd != null && victim.isValid() && !victim.isDead()) {
-            victim.teleport(pd);
+        if (pd == null || !victim.isValid() || victim.isDead()) return;
+
+        Location home = victim.getLocation().clone();  // where 106 grabbed them - their way back
+        victim.teleport(pd);
+
+        // With exits set, the pocket dimension becomes a race: find a way out before it
+        // digests you. With none set it's the old one-way corrosion (no session, no timer).
+        if (plugin.pocketExits().isEmpty()) {
             Msg.actionbar(victim, Component.text("The world corrodes away.", NamedTextColor.GRAY, TextDecoration.ITALIC));
+            return;
+        }
+        int deadline = tick + Math.max(5, plugin.pocketEscapeSeconds()) * 20;
+        pdSessions.put(victim.getUniqueId(), new PdSession(home, deadline));
+        Msg.actionbar(victim, Component.text("The world corrodes away. Find a way out.",
+            NamedTextColor.GRAY, TextDecoration.ITALIC));
+    }
+
+    /** Sweep every player lost in the pocket dimension: escape if they reach an exit,
+     *  otherwise SCP-106 digests them when the clock runs out. */
+    private void tickPocket() {
+        double r = plugin.pocketExitRadius();
+        double r2 = r * r;
+        List<Location> exits = plugin.pocketExits();
+        var it = pdSessions.entrySet().iterator();
+        while (it.hasNext()) {
+            var e = it.next();
+            Player p = Bukkit.getPlayer(e.getKey());
+            PdSession s = e.getValue();
+            if (p == null || !p.isOnline()) { it.remove(); continue; }
+            if (p.isDead()) { it.remove(); continue; }
+
+            // Reached an exit? Home you go.
+            Location loc = p.getLocation();
+            boolean escaped = false;
+            for (Location exit : exits) {
+                if (exit.getWorld() == null || !exit.getWorld().equals(loc.getWorld())) continue;
+                if (exit.distanceSquared(loc) <= r2) { escaped = true; break; }
+            }
+            if (escaped) {
+                it.remove();
+                p.removePotionEffect(PotionEffectType.DARKNESS);
+                p.removePotionEffect(PotionEffectType.BLINDNESS);
+                touchCooldown.put(p.getUniqueId(), tick + 100);  // grace so 106 can't instantly re-grab
+                if (s.returnLoc() != null && s.returnLoc().getWorld() != null) p.teleport(s.returnLoc());
+                p.getWorld().playSound(p.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1f, 1.2f);
+                Msg.actionbar(p, Component.text("You claw back into the world.",
+                    NamedTextColor.GREEN, TextDecoration.ITALIC));
+                continue;
+            }
+
+            // Out of time? SCP-106 keeps you.
+            if (tick >= s.deadline()) {
+                it.remove();
+                p.getWorld().playSound(p.getLocation(), Sound.ENTITY_WARDEN_DEATH, 1f, 0.5f);
+                Msg.actionbar(p, Component.text("SCP-106 drags you under.",
+                    NamedTextColor.DARK_RED, TextDecoration.ITALIC));
+                p.damage(1000.0);
+                continue;
+            }
+
+            // Otherwise: dread and a ticking clock.
+            p.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, 60, 0, true, false, false));
+            if (tick % 20 == 0) {
+                int secs = Math.max(0, (s.deadline() - tick) / 20);
+                Msg.actionbar(p, Component.text("The corrosion closes in - " + secs + "s",
+                    NamedTextColor.GRAY, TextDecoration.ITALIC));
+            }
         }
     }
 
