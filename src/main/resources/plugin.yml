@@ -1,5 +1,5 @@
 name: ScpMobs
-version: '0.6.0'
+version: '0.7.0'
 main: fi.alavesa.scpmobs.ScpMobsPlugin
 softdepend: [Labra]
 api-version: '1.21'
@@ -11,8 +11,10 @@ commands:
     usage: |
       /scpmob spawn <173|106|650|049|939|999>
       /scpmob remove          (SCPs within 16 blocks)
-      /scpmob pd set|clear    (SCP-106 pocket dimension at your position)
+      /scpmob pd tp           (enter the pocket dimension to build)
+      /scpmob pd set|clear    (arrival point of the pocket dimension)
       /scpmob pd exit|clearexits|time <s>  (escape route + timer out of the PD)
+      /scpmob pd door|cleardoors  (link rooms with teleport doorways)
       /scpmob blink on|off
 permissions:
   scpmobs.admin:

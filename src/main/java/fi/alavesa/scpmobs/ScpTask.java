@@ -130,6 +130,8 @@ public final class ScpTask implements Runnable {
     private final Map<UUID, Integer> nextWander = new HashMap<>();
     /** Players currently lost in SCP-106's pocket dimension, with their way home. */
     private final Map<UUID, PdSession> pdSessions = new HashMap<>();
+    /** Debounce so a doorway doesn't immediately teleport the player back. */
+    private final Map<UUID, Integer> doorCooldown = new HashMap<>();
     private int tick;
 
     /** A victim's stay in the pocket dimension: where they came from and when it runs out. */
@@ -171,6 +173,8 @@ public final class ScpTask implements Runnable {
         }
         tickCaging();
         tickSurgeries();
+        World pw = plugin.pocketWorld();
+        if (pw != null && !pw.getPlayers().isEmpty()) tickPocketWorld(pw);
         if (!pdSessions.isEmpty()) tickPocket();
         if (tick % 600 == 0) tickBreachSpawns();
         touchCooldown.entrySet().removeIf(e -> e.getValue() < tick);
@@ -659,6 +663,45 @@ public final class ScpTask implements Runnable {
                 int secs = Math.max(0, (s.deadline() - tick) / 20);
                 Msg.actionbar(p, Component.text("The corrosion closes in - " + secs + "s",
                     NamedTextColor.GRAY, TextDecoration.ITALIC));
+            }
+        }
+    }
+
+    /** Everyone inside the pocket dimension: tar underfoot drags and blinds them, and
+     *  linked doorways whisk them between rooms. Runs for admins and victims alike. */
+    private void tickPocketWorld(World pw) {
+        Material tar = plugin.pocketTarBlock();
+        int slow = Math.max(0, plugin.pocketTarSlowness());
+        double dr = plugin.pocketDoorRadius();
+        double dr2 = dr * dr;
+        List<Location[]> doors = plugin.pocketDoors();
+        doorCooldown.entrySet().removeIf(e -> e.getValue() < tick);
+
+        for (Player p : pw.getPlayers()) {
+            if (p.getGameMode() == org.bukkit.GameMode.SPECTATOR) continue;
+
+            // Doorways: step near one end, arrive at the other (facing its yaw).
+            if (!doors.isEmpty() && !doorCooldown.containsKey(p.getUniqueId())) {
+                Location loc = p.getLocation();
+                for (Location[] d : doors) {
+                    Location from = null, to = null;
+                    if (d[0].distanceSquared(loc) <= dr2) { from = d[0]; to = d[1]; }
+                    else if (d[1].distanceSquared(loc) <= dr2) { from = d[1]; to = d[0]; }
+                    if (to != null) {
+                        doorCooldown.put(p.getUniqueId(), tick + 30);
+                        p.teleport(to);
+                        p.playSound(to, Sound.ENTITY_ENDERMAN_TELEPORT, 0.7f, 0.8f);
+                        break;
+                    }
+                }
+            }
+
+            // Tar: the block at the feet or just below corrodes movement and sight.
+            Material at = p.getLocation().getBlock().getType();
+            Material below = p.getLocation().getBlock().getRelative(0, -1, 0).getType();
+            if (at == tar || below == tar) {
+                p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 40, slow, true, false, false));
+                p.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, 60, 0, true, false, false));
             }
         }
     }

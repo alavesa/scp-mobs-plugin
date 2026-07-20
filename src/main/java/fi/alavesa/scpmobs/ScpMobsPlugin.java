@@ -5,6 +5,8 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -21,6 +23,9 @@ import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -28,10 +33,16 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private BlinkManager blink;
     private ScpTask task;
+    /** Half-linked doorway: first /scpmob pd door stores endpoint A here until the second call. */
+    private final java.util.Map<java.util.UUID, Location> pendingDoor = new java.util.HashMap<>();
+
+    /** Resource key of the datapack-registered pocket dimension world. */
+    public static final NamespacedKey POCKET_KEY = new NamespacedKey("scp", "pocket");
 
     @Override
     public void onEnable() {
         saveDefaultConfigSafely();
+        installDimensionDatapack();
         blink = new BlinkManager();
         blink.setEnabled(getConfig().getBoolean("blink.enabled", true));
         task = new ScpTask(this, blink);
@@ -39,8 +50,84 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(new CageListener(task), this);
         getServer().getScheduler().runTaskTimer(this, () -> blink.tick(), 20L, 1L);
         getServer().getScheduler().runTaskTimer(this, task, 40L, 2L);
-        getLogger().info("ScpMobs enabled - blink " + (blink.isEnabled() ? "on" : "off"));
+        getLogger().info("ScpMobs enabled - blink " + (blink.isEnabled() ? "on" : "off")
+            + ", pocket dimension " + (pocketWorld() != null ? "ready" : "PENDING RESTART"));
     }
+
+    /** The pocket dimension world, or null until the datapack is registered (needs one restart). */
+    public World pocketWorld() {
+        return Bukkit.getWorld(POCKET_KEY);
+    }
+
+    // The dimension is a real datapack dimension (like the nether/end) so it gets native
+    // eternal-dark fog and its own sky. Bukkit can't register a dimension at runtime, so we
+    // drop the datapack into the main world's datapacks folder; it loads on the next restart.
+    private void installDimensionDatapack() {
+        try {
+            File world = new File(Bukkit.getWorldContainer(), Bukkit.getWorlds().get(0).getName());
+            File root = new File(world, "datapacks/scp_pocket");
+            boolean fresh = !root.exists();
+            new File(root, "data/scp/dimension_type").mkdirs();
+            new File(root, "data/scp/dimension").mkdirs();
+            writeIfAbsent(new File(root, "pack.mcmeta"), PACK_MCMETA);
+            writeIfAbsent(new File(root, "data/scp/dimension_type/pocket.json"), DIM_TYPE_JSON);
+            writeIfAbsent(new File(root, "data/scp/dimension/pocket.json"), DIM_JSON);
+            if (fresh || pocketWorld() == null) {
+                getLogger().warning("SCP-106 pocket dimension datapack installed at "
+                    + root.getPath() + " - RESTART the server once to register the 'scp:pocket' dimension.");
+            }
+        } catch (Exception e) {
+            getLogger().warning("Could not install the pocket-dimension datapack: " + e.getMessage());
+        }
+    }
+
+    private void writeIfAbsent(File f, String content) throws java.io.IOException {
+        if (f.exists()) return;
+        Files.write(f.toPath(), content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static final String PACK_MCMETA =
+        "{\"pack\":{\"pack_format\":81,\"supported_formats\":{\"min_inclusive\":4,\"max_inclusive\":9999},"
+        + "\"description\":\"SCP-106 pocket dimension\"}}";
+
+    private static final String DIM_TYPE_JSON = """
+        {
+          "ultrawarm": false,
+          "natural": false,
+          "piglin_safe": false,
+          "respawn_anchor_works": false,
+          "bed_works": false,
+          "has_raids": false,
+          "has_skylight": false,
+          "has_ceiling": false,
+          "coordinate_scale": 1.0,
+          "ambient_light": 0.05,
+          "logical_height": 256,
+          "effects": "minecraft:the_end",
+          "infiniburn": "#minecraft:infiniburn_overworld",
+          "min_y": 0,
+          "height": 256,
+          "monster_spawn_block_light_limit": 0,
+          "monster_spawn_light_level": 0,
+          "fixed_time": 18000
+        }""";
+
+    private static final String DIM_JSON = """
+        {
+          "type": "scp:pocket",
+          "generator": {
+            "type": "minecraft:flat",
+            "settings": {
+              "biome": "minecraft:deep_dark",
+              "lakes": false,
+              "features": false,
+              "layers": [
+                {"block": "minecraft:bedrock", "height": 1},
+                {"block": "minecraft:sculk", "height": 6}
+              ]
+            }
+          }
+        }""";
 
     private void saveDefaultConfigSafely() {
         getConfig().addDefault("blink.enabled", true);
@@ -51,6 +138,11 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
         getConfig().addDefault("breach.106", false);
         getConfig().addDefault("scp106.breach-max", 2);
         getConfig().addDefault("scp106.ambush-chance", 0.08);
+        getConfig().addDefault("pd.escape-seconds", 90);
+        getConfig().addDefault("pd.exit-radius", 2.5);
+        getConfig().addDefault("pd.door-radius", 1.6);
+        getConfig().addDefault("pd.tar-block", "SCULK");
+        getConfig().addDefault("pd.tar-slowness", 2);   // potion amplifier: 2 = Slowness III
         getConfig().options().copyDefaults(true);
         saveConfig();
     }
@@ -58,6 +150,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
     public Location pocketDimension() {
         if (!getConfig().isSet("pd.world")) return null;
         var world = Bukkit.getWorld(getConfig().getString("pd.world", ""));
+        if (world == null) world = pocketWorld();   // name didn't resolve - fall back to the real dimension
         if (world == null) return null;
         return new Location(world,
             getConfig().getDouble("pd.x"), getConfig().getDouble("pd.y"), getConfig().getDouble("pd.z"),
@@ -95,6 +188,47 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     public double pocketExitRadius() { return getConfig().getDouble("pd.exit-radius", 2.5); }
     public int pocketEscapeSeconds() { return getConfig().getInt("pd.escape-seconds", 90); }
+    public double pocketDoorRadius() { return getConfig().getDouble("pd.door-radius", 1.6); }
+    public int pocketTarSlowness() { return getConfig().getInt("pd.tar-slowness", 2); }
+
+    /** The block that behaves as corroding tar (slows + darkens). Defaults to sculk. */
+    public Material pocketTarBlock() {
+        Material m = Material.matchMaterial(getConfig().getString("pd.tar-block", "SCULK"));
+        return m != null && m.isBlock() ? m : Material.SCULK;
+    }
+
+    /** Linked doorways inside the pocket dimension. Each is {a, b}; stepping on one
+     *  end teleports to the other, so admins can wire up rooms. */
+    public java.util.List<Location[]> pocketDoors() {
+        java.util.List<Location[]> out = new java.util.ArrayList<>();
+        World w = pocketWorld();
+        if (w == null) return out;
+        for (String s : getConfig().getStringList("pd.doors")) {
+            String[] p = s.split(",");
+            if (p.length < 8) continue;
+            try {
+                Location a = new Location(w, Double.parseDouble(p[0]), Double.parseDouble(p[1]),
+                    Double.parseDouble(p[2]), Float.parseFloat(p[3]), 0f);
+                Location b = new Location(w, Double.parseDouble(p[4]), Double.parseDouble(p[5]),
+                    Double.parseDouble(p[6]), Float.parseFloat(p[7]), 0f);
+                out.add(new Location[]{a, b});
+            } catch (NumberFormatException ignored) { }
+        }
+        return out;
+    }
+
+    public void addPocketDoor(Location a, Location b) {
+        java.util.List<String> list = getConfig().getStringList("pd.doors");
+        list.add(a.getX() + "," + a.getY() + "," + a.getZ() + "," + a.getYaw() + ","
+               + b.getX() + "," + b.getY() + "," + b.getZ() + "," + b.getYaw());
+        getConfig().set("pd.doors", list);
+        saveConfig();
+    }
+
+    public void clearPocketDoors() {
+        getConfig().set("pd.doors", null);
+        saveConfig();
+    }
 
     // SCPs cannot be harmed; the statue must never burn or drown either.
     @EventHandler
@@ -296,6 +430,45 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                         + " seconds.", NamedTextColor.GRAY));
                     return true;
                 }
+                if (args[1].equalsIgnoreCase("tp")) {
+                    if (!(sender instanceof Player p3)) return error(sender, "Players only.");
+                    World pw = pocketWorld();
+                    if (pw == null) return error(sender, "The pocket dimension isn't registered yet - "
+                        + "restart the server once after installing this version.");
+                    Location dest = pocketDimension();
+                    if (dest == null || dest.getWorld() == null || !dest.getWorld().equals(pw)) {
+                        dest = pw.getSpawnLocation();
+                    }
+                    p3.teleport(dest);
+                    sender.sendMessage(Component.text("Teleported into SCP-106's pocket dimension.",
+                        NamedTextColor.GRAY));
+                    return true;
+                }
+                if (args[1].equalsIgnoreCase("cleardoors")) {
+                    clearPocketDoors();
+                    pendingDoor.clear();
+                    sender.sendMessage(Component.text("All pocket-dimension doorways cleared.",
+                        NamedTextColor.GRAY));
+                    return true;
+                }
+                if (args[1].equalsIgnoreCase("door")) {
+                    if (!(sender instanceof Player p4)) return error(sender, "Players only.");
+                    World pw = pocketWorld();
+                    if (pw == null || !p4.getWorld().equals(pw)) {
+                        return error(sender, "Stand inside the pocket dimension (/scpmob pd tp) to link a doorway.");
+                    }
+                    Location a = pendingDoor.remove(p4.getUniqueId());
+                    if (a == null) {
+                        pendingDoor.put(p4.getUniqueId(), p4.getLocation());
+                        sender.sendMessage(Component.text("Doorway endpoint A marked here. Run /scpmob pd door "
+                            + "again at the other room to link them.", NamedTextColor.GRAY));
+                    } else {
+                        addPocketDoor(a, p4.getLocation());
+                        sender.sendMessage(Component.text("Doorway linked (" + pocketDoors().size()
+                            + " total). Stepping on either end now teleports to the other.", NamedTextColor.GRAY));
+                    }
+                    return true;
+                }
                 if (!(sender instanceof Player player)) return error(sender, "Players only.");
                 Location at = player.getLocation();
                 getConfig().set("pd.world", at.getWorld().getName());
@@ -330,7 +503,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
                     .filter(o -> o.startsWith(args[1])).toList();
                 case "give" -> Stream.of("cage").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 case "breach", "contain" -> Stream.of("173", "106", "all").filter(o -> o.startsWith(args[1])).toList();
-                case "pd" -> Stream.of("set", "clear", "exit", "clearexits", "time")
+                case "pd" -> Stream.of("set", "clear", "exit", "clearexits", "time", "tp", "door", "cleardoors")
                     .filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 case "blink" -> Stream.of("on", "off").filter(o -> o.startsWith(args[1].toLowerCase())).toList();
                 default -> List.of();
@@ -364,7 +537,9 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
 
     private boolean usage(CommandSender sender) {
         sender.sendMessage(Component.text(
-            "/scpmob spawn <173|106|650|049|939|999> | give cage [player] | breach|contain <173|106|all> | status | remove | pd set|clear|exit|clearexits|time <s> | blink on|off", NamedTextColor.AQUA));
+            "/scpmob spawn <173|106|650|049|939|999> | give cage [player] | breach|contain <173|106|all> | status | remove | blink on|off", NamedTextColor.AQUA));
+        sender.sendMessage(Component.text(
+            "/scpmob pd set|clear|tp | exit|clearexits | time <s> | door|cleardoors  (SCP-106 pocket dimension)", NamedTextColor.AQUA));
         return true;
     }
 
