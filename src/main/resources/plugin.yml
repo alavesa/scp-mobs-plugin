@@ -1,5 +1,5 @@
 name: ScpMobs
-version: '0.7.2'
+version: '0.7.3'
 main: fi.alavesa.scpmobs.ScpMobsPlugin
 softdepend: [Labra]
 api-version: '1.21'
