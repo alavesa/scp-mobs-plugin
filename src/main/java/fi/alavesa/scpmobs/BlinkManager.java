@@ -6,6 +6,8 @@ import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.entity.Player;
+import org.bukkit.scoreboard.Criteria;
+import org.bukkit.scoreboard.Objective;
 
 import java.time.Duration;
 import java.util.HashMap;
@@ -35,12 +37,33 @@ public final class BlinkManager {
     private int now;
     private boolean enabled = true;
 
+    /** Scoreboard channel the Labra HUD reads to draw the blink bar (0-100, unset = off). */
+    public static final String BLINK_OBJECTIVE = "lab.blink";
+
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
         if (!enabled) {
             meter.clear();
             blinkingUntil.clear();
+            // pull the bar off everyone's HUD
+            Objective obj = blinkObjective();
+            if (obj != null) {
+                for (Player p : Bukkit.getOnlinePlayers()) obj.getScoreboard().resetScores(p.getName());
+            }
         }
+    }
+
+    private Objective blinkObjective() {
+        var board = Bukkit.getScoreboardManager().getMainScoreboard();
+        Objective obj = board.getObjective(BLINK_OBJECTIVE);
+        if (obj == null) {
+            try {
+                obj = board.registerNewObjective(BLINK_OBJECTIVE, Criteria.DUMMY, Component.text("Blink"));
+            } catch (IllegalArgumentException e) {
+                obj = board.getObjective(BLINK_OBJECTIVE);   // registered in a race
+            }
+        }
+        return obj;
     }
 
     public boolean isEnabled() { return enabled; }
@@ -55,17 +78,25 @@ public final class BlinkManager {
     public void tick() {
         now++;
         if (!enabled) return;
+        Objective obj = blinkObjective();
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (player.getGameMode() != GameMode.SURVIVAL
-                && player.getGameMode() != GameMode.ADVENTURE) continue;
+                && player.getGameMode() != GameMode.ADVENTURE) {
+                if (obj != null) obj.getScoreboard().resetScores(player.getName());
+                continue;
+            }
             int left = meter.getOrDefault(player.getUniqueId(), METER_TICKS) - 1;
             if (left <= 0) {
                 blink(player);
                 left = METER_TICKS;
             }
             meter.put(player.getUniqueId(), left);
-            player.setLevel(0);
-            player.setExp(Math.max(0f, Math.min(1f, left / (float) METER_TICKS)));
+            // Publish 0-100 to the shared scoreboard; the Labra HUD draws the bar
+            // at the top of the screen. The XP bar is no longer touched.
+            if (obj != null) {
+                int pct = Math.round(Math.max(0f, Math.min(1f, left / (float) METER_TICKS)) * 100f);
+                obj.getScore(player.getName()).setScore(pct);
+            }
         }
     }
 
