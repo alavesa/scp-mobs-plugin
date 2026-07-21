@@ -34,6 +34,9 @@ public final class BlinkManager {
 
     private final Map<UUID, Integer> meter = new HashMap<>();
     private final Map<UUID, Integer> blinkingUntil = new HashMap<>();
+    /** Cached "is there fire right next to this player" flag (refreshed twice a second). */
+    private final Map<UUID, Boolean> nearFire = new HashMap<>();
+    private static final int FIRE_DRAIN = 5;   // near fire the 20s meter empties in 4s
     private int now;
     private boolean enabled = true;
 
@@ -85,7 +88,11 @@ public final class BlinkManager {
                 if (obj != null) obj.getScoreboard().resetScores(player.getName());
                 continue;
             }
-            int left = meter.getOrDefault(player.getUniqueId(), METER_TICKS) - 1;
+            // Smoke stings the eyes: fire nearby drains the blink meter 5x faster, so
+            // the 20-second hold collapses to 4 seconds when you're right by a blaze.
+            if (now % 10 == 0) nearFire.put(player.getUniqueId(), fireNear(player));
+            int drain = nearFire.getOrDefault(player.getUniqueId(), false) ? FIRE_DRAIN : 1;
+            int left = meter.getOrDefault(player.getUniqueId(), METER_TICKS) - drain;
             if (left <= 0) {
                 blink(player);
                 left = METER_TICKS;
@@ -98,6 +105,15 @@ public final class BlinkManager {
                 obj.getScore(player.getName()).setScore(pct);
             }
         }
+    }
+
+    /** Any fire within 3 blocks of the player. */
+    private boolean fireNear(Player player) {
+        var base = player.getLocation().getBlock();
+        for (int x = -3; x <= 3; x++) for (int y = -3; y <= 3; y++) for (int z = -3; z <= 3; z++) {
+            if (base.getRelative(x, y, z).getType() == org.bukkit.Material.FIRE) return true;
+        }
+        return false;
     }
 
     private void blink(Player player) {
