@@ -37,6 +37,10 @@ public final class BlinkManager {
     /** Cached "is there fire right next to this player" flag (refreshed twice a second). */
     private final Map<UUID, Boolean> nearFire = new HashMap<>();
     private static final int FIRE_DRAIN = 5;   // near fire the 20s meter empties in 4s
+    /** A worn Labra gas mask (leather helmet carrying this PDC tag) filters the
+     *  smoke, so fire no longer drains the blink meter any faster. */
+    private static final org.bukkit.NamespacedKey GAS_MASK =
+        org.bukkit.NamespacedKey.fromString("labra:gasmask");
     private int now;
     private boolean enabled = true;
 
@@ -91,7 +95,8 @@ public final class BlinkManager {
             // Smoke stings the eyes: fire nearby drains the blink meter 5x faster, so
             // the 20-second hold collapses to 4 seconds when you're right by a blaze.
             if (now % 10 == 0) nearFire.put(player.getUniqueId(), fireNear(player));
-            int drain = nearFire.getOrDefault(player.getUniqueId(), false) ? FIRE_DRAIN : 1;
+            boolean fireHurts = nearFire.getOrDefault(player.getUniqueId(), false) && !wearsGasMask(player);
+            int drain = fireHurts ? FIRE_DRAIN : 1;
             int left = meter.getOrDefault(player.getUniqueId(), METER_TICKS) - drain;
             if (left <= 0) {
                 blink(player);
@@ -105,6 +110,14 @@ public final class BlinkManager {
                 obj.getScore(player.getName()).setScore(pct);
             }
         }
+    }
+
+    /** True if the player wears a Labra gas mask (any tier) - it filters the smoke. */
+    private boolean wearsGasMask(Player player) {
+        var helm = player.getInventory().getHelmet();
+        return GAS_MASK != null && helm != null && helm.hasItemMeta()
+            && helm.getItemMeta().getPersistentDataContainer()
+                .has(GAS_MASK, org.bukkit.persistence.PersistentDataType.STRING);
     }
 
     /** Any fire within 3 blocks of the player. */
