@@ -46,6 +46,10 @@ public final class BlinkManager {
 
     /** Scoreboard channel the Labra HUD reads to draw the blink bar (0-100, unset = off). */
     public static final String BLINK_OBJECTIVE = "lab.blink";
+    /** 1 while the player is mid-blink (screen black), else 0. Published so the Labra
+     *  gas-mask / NVG overlay can YIELD during a blink instead of overwriting the
+     *  darkness title - which was cutting the blink short whenever headgear was worn. */
+    public static final String BLINKING_OBJECTIVE = "lab.blinking";
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
@@ -86,10 +90,12 @@ public final class BlinkManager {
         now++;
         if (!enabled) return;
         Objective obj = blinkObjective();
+        Objective blinkingObj = objective(BLINKING_OBJECTIVE, "Blinking");
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (player.getGameMode() != GameMode.SURVIVAL
                 && player.getGameMode() != GameMode.ADVENTURE) {
                 if (obj != null) obj.getScoreboard().resetScores(player.getName());
+                if (blinkingObj != null) blinkingObj.getScoreboard().resetScores(player.getName());
                 continue;
             }
             // Smoke stings the eyes: fire nearby drains the blink meter 5x faster, so
@@ -109,7 +115,21 @@ public final class BlinkManager {
                 int pct = Math.round(Math.max(0f, Math.min(1f, left / (float) METER_TICKS)) * 100f);
                 obj.getScore(player.getName()).setScore(pct);
             }
+            if (blinkingObj != null) {
+                blinkingObj.getScore(player.getName()).setScore(isBlinking(player) ? 1 : 0);
+            }
         }
+    }
+
+    /** Fetch (or create) a shared main-scoreboard DUMMY objective by id. */
+    private Objective objective(String id, String display) {
+        var board = Bukkit.getScoreboardManager().getMainScoreboard();
+        Objective o = board.getObjective(id);
+        if (o == null) {
+            try { o = board.registerNewObjective(id, Criteria.DUMMY, Component.text(display)); }
+            catch (IllegalArgumentException e) { o = board.getObjective(id); }
+        }
+        return o;
     }
 
     /** True if the player wears a Labra gas mask (any tier) - it filters the smoke. */
