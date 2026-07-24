@@ -118,6 +118,12 @@ public final class BlinkManager {
             if (blinkingObj != null) {
                 blinkingObj.getScore(player.getName()).setScore(isBlinking(player) ? 1 : 0);
             }
+            // Re-assert the darkness EVERY tick while blinking (fadeIn 0 = instant), so if the
+            // credits HUD title leaks through for a tick (task-order race), the darkness wins
+            // it back next tick instead of the screen flickering.
+            if (isBlinking(player)) {
+                player.showTitle(BLINK_TITLE);
+            }
         }
     }
 
