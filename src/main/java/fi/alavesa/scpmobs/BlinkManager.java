@@ -23,8 +23,10 @@ import java.util.UUID;
  */
 public final class BlinkManager {
 
-    public static final int METER_TICKS = 20 * 20;   // 20 seconds
+    public static final int METER_TICKS = 15 * 20;   // 15 seconds per blink
     public static final int BLINK_TICKS = 10;        // half a second of darkness
+    /** The darkness only shows when an SCP-173 is within this range AND in line of sight. */
+    private static final double BLINK_173_RANGE = 30.0;
 
     private static final Component BLINK_GLYPH =
         Component.text("\uE000").font(Key.key("scp", "blink"));
@@ -120,8 +122,10 @@ public final class BlinkManager {
             }
             // Re-assert the darkness EVERY tick while blinking (fadeIn 0 = instant), so if the
             // credits HUD title leaks through for a tick (task-order race), the darkness wins
-            // it back next tick instead of the screen flickering.
-            if (isBlinking(player)) {
+            // it back next tick instead of the screen flickering. But ONLY when an SCP-173 is
+            // actually looking at you (in range, not behind a wall) - no blackouts otherwise, and
+            // if 173 ducks behind cover mid-blink the darkness fades out in a tenth of a second.
+            if (isBlinking(player) && near173WithLoS(player)) {
                 player.showTitle(BLINK_TITLE);
             }
         }
@@ -157,7 +161,16 @@ public final class BlinkManager {
 
     private void blink(Player player) {
         blinkingUntil.put(player.getUniqueId(), now + BLINK_TICKS);
-        player.showTitle(BLINK_TITLE);
+        if (near173WithLoS(player)) player.showTitle(BLINK_TITLE);
+    }
+
+    /** True when an SCP-173 (the tagged Wolf) is within {@link #BLINK_173_RANGE} and the player has a
+     *  clear line of sight to it - i.e. it isn't behind a wall. */
+    private boolean near173WithLoS(Player player) {
+        for (var e : player.getNearbyEntities(BLINK_173_RANGE, BLINK_173_RANGE, BLINK_173_RANGE)) {
+            if (e.getScoreboardTags().contains(ScpTask.TAG_173) && player.hasLineOfSight(e)) return true;
+        }
+        return false;
     }
 
     public void forget(UUID player) {
