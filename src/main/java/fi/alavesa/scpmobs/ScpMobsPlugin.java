@@ -93,7 +93,7 @@ public final class ScpMobsPlugin extends JavaPlugin implements Listener {
     }
 
     private static final String PACK_MCMETA =
-        "{\"pack\":{\"pack_format\":81,\"supported_formats\":{\"min_inclusive\":4,\"max_inclusive\":9999},"
+        "{\"pack\":{\"pack_format\":81,\"supported_formats\":{\"min_inclusive\":4,\"max_inclusive\":9999},\"min_format\":4,\"max_format\":9999,"
         + "\"description\":\"SCP-106 pocket dimension\"}}";
 
     private static final String DIM_TYPE_JSON = """
